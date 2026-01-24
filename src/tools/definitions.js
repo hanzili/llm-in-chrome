@@ -491,9 +491,13 @@ export const TOOL_DEFINITIONS = [
           type: 'string',
           description: 'CSS selector for the file input element (e.g., "input[type=file]", "#resume-upload"). Used if ref is not provided.',
         },
+        filePath: {
+          type: 'string',
+          description: 'Absolute path to a local file (e.g., "/Users/name/Documents/resume.pdf"). Use this when you know the exact file location.',
+        },
         fileUrl: {
           type: 'string',
-          description: 'URL of the file to upload. The file will be downloaded and then uploaded to the input.',
+          description: 'URL of the file to upload. The file will be downloaded first, then uploaded to the input.',
         },
         base64Data: {
           type: 'string',

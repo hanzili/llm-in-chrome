@@ -1148,7 +1148,10 @@ ERROR: explanation`;
         let filePath;
         const fileName = toolInput.fileName || 'uploaded_file';
 
-        if (toolInput.fileUrl) {
+        if (toolInput.filePath) {
+          // Use local file path directly
+          filePath = toolInput.filePath;
+        } else if (toolInput.fileUrl) {
           // Download file from URL
           const downloadId = await new Promise((resolve, reject) => {
             chrome.downloads.download({
@@ -1238,7 +1241,7 @@ ERROR: explanation`;
             }, 30000);
           });
         } else {
-          return 'Error: Either fileUrl or base64Data must be provided';
+          return 'Error: Must provide filePath, fileUrl, or base64Data';
         }
 
         // Use CDP to set the file on the input element
