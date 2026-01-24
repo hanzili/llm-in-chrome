@@ -161,8 +161,9 @@ function isInteractive(element) {
  */
 function hasSemantic(element) {
   var tag = element.tagName.toLowerCase();
+  // Include structural elements that appear in Claude in Chrome's output
   return ["h1", "h2", "h3", "h4", "h5", "h6", "nav", "main", "header",
-          "footer", "section", "article", "aside"].includes(tag) ||
+          "footer", "section", "article", "aside", "ul", "ol", "li", "table"].includes(tag) ||
          null !== element.getAttribute("role");
 }
 
@@ -192,13 +193,22 @@ function shouldInclude(element, options) {
       return false;
   }
 
-  // For interactive filter, only include interactive elements
-  if ("interactive" === options.filter) return isInteractive(element);
-
   // Include interactive elements
   if (isInteractive(element)) return true;
 
-  // Include semantic elements
+  // For interactive filter, also include semantic elements, images, and text
+  // (matching Claude in Chrome behavior)
+  if ("interactive" === options.filter) {
+    // Include semantic elements
+    if (hasSemantic(element)) return true;
+    // Include images (important for CAPTCHA)
+    if (element.tagName.toLowerCase() === "img") return true;
+    // Include elements with accessible names (text content)
+    if (getName(element).length > 0) return true;
+    return false;
+  }
+
+  // For 'all' filter, include semantic elements
   if (hasSemantic(element)) return true;
 
   // Include elements with accessible names
@@ -270,6 +280,14 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
           line += ' type="' + element.getAttribute("type") + '"';
         if (element.getAttribute("placeholder"))
           line += ' placeholder="' + element.getAttribute("placeholder") + '"';
+
+        // Add position info for images (helps agent understand visual layout for CAPTCHAs)
+        if ("img" === element.tagName.toLowerCase()) {
+          try {
+            var imgRect = element.getBoundingClientRect();
+            line += ' pos="(' + Math.round(imgRect.left) + ',' + Math.round(imgRect.top) + ')"';
+          } catch (e) {}
+        }
 
         output.push(line);
 
@@ -448,25 +466,29 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
       }
     }
 
-    // Check output size
+    // Check output size and truncate if needed (instead of returning empty)
     var result = output.join("\n");
+    var truncated = false;
+    var truncationNote = "";
+
     if (null != maxChars && result.length > maxChars) {
-      var errorMsg = "Output exceeds " + maxChars + " character limit (" + result.length + " characters). ";
-      errorMsg += refId
-        ? "The specified element has too much content. Try specifying a smaller depth parameter or focus on a more specific child element."
-        : (void 0 !== maxDepth
-            ? "Try specifying an even smaller depth parameter or use ref_id to focus on a specific element."
-            : "Try specifying a depth parameter (e.g., depth: 5) or use ref_id to focus on a specific element from the page.");
-      return {
-        error: errorMsg,
-        pageContent: "",
-        viewport: { width: window.innerWidth, height: window.innerHeight }
-      };
+      // Find a good truncation point (end of a line)
+      var truncPoint = maxChars;
+      var lastNewline = result.lastIndexOf("\n", maxChars);
+      if (lastNewline > maxChars * 0.8) {
+        truncPoint = lastNewline;
+      }
+      result = result.substring(0, truncPoint);
+      truncated = true;
+      truncationNote = "\n\n[TRUNCATED: Output exceeded " + maxChars + " chars. " +
+        "Only refs shown above are valid. Use filter='interactive' to see only interactive elements, " +
+        "or use ref_id to focus on a specific element, or scroll to see more of the page.]";
     }
 
     return {
-      pageContent: result,
-      viewport: { width: window.innerWidth, height: window.innerHeight }
+      pageContent: result + truncationNote,
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      truncated: truncated
     };
 
   } catch (err) {
@@ -492,11 +514,21 @@ window.__getElementByRef = function(refId) {
 
 /**
  * Get bounding rect for a ref ID (for coordinate-based actions)
- * Includes iframe offset for elements inside iframes
+ * Scrolls element into view first (like Claude in Chrome), then returns coordinates.
+ * Includes iframe offset for elements inside iframes.
  */
 window.__getElementRect = function(refId) {
   var element = window.__getElementByRef(refId);
   if (!element) return null;
+
+  // Scroll element into view first - EXACTLY like Claude in Chrome
+  // They use: scrollIntoView({behavior:"instant",block:"center",inline:"center"})
+  element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
+
+  // Force reflow to ensure scroll is complete (Claude in Chrome does this)
+  if (element instanceof HTMLElement) {
+    void element.offsetHeight;
+  }
 
   var rect = element.getBoundingClientRect();
 
