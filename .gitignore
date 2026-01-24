@@ -1,0 +1,21 @@
+# Reference files (Claude in Chrome source code for reference only)
+reference/
+
+# Unused code
+docs/
+profiles/
+src/popup/
+src/types/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
