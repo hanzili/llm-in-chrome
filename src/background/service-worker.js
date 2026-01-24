@@ -1,14 +1,22 @@
 /**
- * Service Worker - Claude in Chrome Clone
+ * Service Worker - Browser Agent
  *
  * Orchestrates browser automation by:
- * 1. Receiving tasks from the popup
+ * 1. Receiving tasks from the sidepanel
  * 2. Calling Claude API with tools
  * 3. Executing tool calls via content scripts
  * 4. Looping until task is complete
  */
 
 import { TOOL_DEFINITIONS } from '../tools/definitions.js';
+import { getDomainSkills } from './modules/domain-skills.js';
+import { getKeyCode, requiresShift, pressKey, pressKeyChord } from './modules/keys.js';
+import { buildSystemPrompt } from './modules/system-prompt.js';
+import {
+  loadConfig, getConfig, setConfig, getApiHeaders,
+  createAbortController, getAbortController, abortRequest,
+  callClaude, callClaudeSimple
+} from './modules/api.js';
 
 // ============================================
 // LOGGING
@@ -146,176 +154,6 @@ function buildCleanTurns(messages) {
 }
 
 // ============================================
-// CONFIGURATION
-// ============================================
-
-let config = {
-  apiBaseUrl: 'http://127.0.0.1:8000/claude/v1/messages',
-  apiKey: null, // Optional API key for direct API access
-  model: 'claude-sonnet-4-20250514', // Default model (overridden by UI setting)
-  maxTokens: 10000,
-  maxSteps: 0,
-};
-
-// ============================================
-// DOMAIN SKILLS
-// ============================================
-
-/**
- * Domain-specific skills and best practices for common websites.
- * These are injected into the agent's context when visiting matching domains.
- */
-const DOMAIN_SKILLS = [
-  {
-    domain: 'mail.google.com',
-    skill: `Gmail best practices:
-- To open an email, click directly on the email subject/preview text, NOT the checkbox or star
-- Use keyboard shortcuts: 'c' to compose, 'r' to reply, 'a' to reply all, 'f' to forward, 'e' to archive
-- To search, use the search bar at the top with operators like 'from:', 'to:', 'subject:', 'is:unread'
-- Reading pane may be on the right or below depending on user settings - check which layout is active
-- Verification codes are often in emails from 'noreply@' addresses with subjects containing 'verification', 'code', or 'confirm'`
-  },
-  {
-    domain: 'docs.google.com',
-    skill: `Google Docs best practices:
-- This is a canvas-based application - use screenshots to see content, read_page may not capture all text
-- Use keyboard shortcuts: Cmd/Ctrl+B for bold, Cmd/Ctrl+I for italic, Cmd/Ctrl+K for links
-- To navigate, use Cmd/Ctrl+F to find text, then click on the result
-- For editing, click to place cursor then type - triple-click to select a paragraph
-- Access menus via the menu bar at the top (File, Edit, View, Insert, Format, etc.)`
-  },
-  {
-    domain: 'sheets.google.com',
-    skill: `Google Sheets best practices:
-- Click on cells to select them, double-click to edit cell content
-- Use Tab to move right, Enter to move down, arrow keys to navigate
-- Formulas start with '=' - e.g., =SUM(A1:A10), =VLOOKUP(), =IF()
-- Use Cmd/Ctrl+C and Cmd/Ctrl+V for copy/paste
-- Select ranges by clicking and dragging, or Shift+click for range selection`
-  },
-  {
-    domain: 'github.com',
-    skill: `GitHub best practices:
-- Repository navigation: Code tab for files, Issues for bug tracking, Pull requests for code review
-- To view a file, click on the filename in the file tree
-- Use 't' to open file finder, 'l' to jump to a line
-- In PRs: 'Files changed' tab shows diffs, 'Conversation' tab shows comments
-- Use the search bar with qualifiers: 'is:open is:pr', 'is:issue label:bug'`
-  },
-  {
-    domain: 'linkedin.com',
-    skill: `LinkedIn best practices:
-- Job search: Use the Jobs tab, filter by location, experience level, date posted
-- To apply: Click 'Easy Apply' button if available, or 'Apply' to go to external site
-- Profile sections are collapsible - click 'Show all' to expand
-- Connection requests and messages are in the 'My Network' and 'Messaging' tabs
-- Use search filters to narrow down people, companies, or jobs`
-  },
-  {
-    domain: 'indeed.com',
-    skill: `Indeed best practices:
-- Search for jobs using the 'What' and 'Where' fields at the top
-- Filter results by date posted, salary, job type, experience level
-- Click job title to view full description
-- 'Apply now' or 'Apply on company site' buttons are typically on the right panel
-- Sign in to save jobs and track applications`
-  },
-  {
-    domain: 'calendar.google.com',
-    skill: `Google Calendar best practices:
-- Click on a time slot to create a new event
-- Drag events to reschedule them
-- Click on an event to view details, edit, or delete
-- Use the mini calendar on the left to navigate to different dates
-- Keyboard: 'c' to create event, 't' to go to today, arrow keys to navigate`
-  },
-  {
-    domain: 'drive.google.com',
-    skill: `Google Drive best practices:
-- Double-click files to open them, single-click to select
-- Right-click for context menu (download, share, rename, etc.)
-- Use the search bar to find files by name or content
-- Create new items with the '+ New' button on the left
-- Drag and drop to move files between folders`
-  },
-  {
-    domain: 'notion.so',
-    skill: `Notion best practices:
-- Click to place cursor, type '/' to open command menu
-- Drag blocks using the ⋮⋮ handle on the left
-- Use sidebar for navigation between pages
-- Toggle blocks expand/collapse on click
-- Databases can be viewed as table, board, calendar, etc.`
-  },
-  {
-    domain: 'figma.com',
-    skill: `Figma best practices:
-- This is a canvas-based design tool - always use screenshots to see content
-- Use 'V' for select tool, 'R' for rectangle, 'T' for text
-- Zoom with Cmd/Ctrl+scroll or Cmd/Ctrl++ and Cmd/Ctrl+-
-- Navigate frames in the left sidebar
-- Right-click for context menus and additional options`
-  },
-  {
-    domain: 'slack.com',
-    skill: `Slack best practices:
-- Channels listed in left sidebar - click to switch
-- Cmd/Ctrl+K to quickly switch channels/DMs
-- @ mentions notify users, # references channels
-- Thread replies keep conversations organized
-- Use the search bar to find messages, files, and people`
-  },
-  {
-    domain: 'twitter.com',
-    skill: `X/Twitter best practices:
-- Compose new post with the 'Post' or compose button
-- Scroll to load more content
-- Click on a post to view full thread and replies
-- Like, repost, reply buttons are below each post
-- Use search with operators: 'from:user', 'to:user', 'filter:media'`
-  },
-  {
-    domain: 'x.com',
-    skill: `X/Twitter best practices:
-- Compose new post with the 'Post' or compose button
-- Scroll to load more content
-- Click on a post to view full thread and replies
-- Like, repost, reply buttons are below each post
-- Use search with operators: 'from:user', 'to:user', 'filter:media'`
-  },
-  {
-    domain: 'amazon.com',
-    skill: `Amazon best practices:
-- Use the search bar at the top for product search
-- Filter results using the left sidebar (price, ratings, Prime, etc.)
-- Click 'Add to Cart' or 'Buy Now' to purchase
-- Product details and reviews are on the product page
-- Check seller information and shipping times before purchasing`
-  },
-];
-
-/**
- * Get domain skills for a given URL
- * @param {string} url - The URL to check
- * @returns {Array} - Array of matching domain skills
- */
-function getDomainSkills(url) {
-  if (!url) return [];
-
-  try {
-    const urlObj = new URL(url);
-    const hostname = urlObj.hostname.toLowerCase();
-
-    return DOMAIN_SKILLS.filter(skill => {
-      // Check if the hostname ends with or equals the skill domain
-      return hostname === skill.domain || hostname.endsWith('.' + skill.domain);
-    });
-  } catch {
-    return [];
-  }
-}
-
-// ============================================
 // IMAGE UTILS
 // ============================================
 
@@ -410,7 +248,6 @@ async function resizeScreenshotForClaude(dataUrl, dpr = 2) {
 
 let currentTask = null;
 let taskCancelled = false;
-let abortController = null; // For aborting API calls on stop
 let debuggerAttached = false;
 let debuggerTabId = null;
 let consoleMessages = [];
@@ -544,107 +381,6 @@ async function validateTabInGroup(tabId) {
   } catch (err) {
     return { valid: false, error: `Tab ${tabId} not found: ${err.message}` };
   }
-}
-
-// ============================================
-// SYSTEM PROMPT - Claude in Chrome style
-// ============================================
-
-function buildSystemPrompt() {
-  const now = new Date();
-  const dateStr = now.toLocaleDateString('en-US', {
-    month: 'numeric',
-    day: 'numeric',
-    year: 'numeric',
-  });
-  const timeStr = now.toLocaleTimeString('en-US');
-
-  return [
-    {
-      type: 'text',
-      text: `You are a web automation assistant with browser tools. Your priority is to complete the user's request efficiently and autonomously.
-
-Browser tasks often require long-running, agentic capabilities. When you encounter a user request that feels time-consuming or extensive in scope, you should be persistent and use all available context needed to accomplish the task. The user expects you to work autonomously until the task is complete. Do not ask for permission - just do it.
-
-<behavior_instructions>
-The current date is ${dateStr}, ${timeStr}.
-
-Claude avoids over-formatting responses. Keep responses concise and action-oriented.
-Claude does not use emojis unless asked.
-
-IMPORTANT: Do not ask for permission or confirmation. The user has already given you all the information you need. Just complete the task.
-</behavior_instructions>
-
-<tool_usage_requirements>
-Claude uses the "read_page" tool first to assign reference identifiers to all DOM elements and get an overview of the page. This allows Claude to reliably take action on the page even if the viewport size changes or the element is scrolled out of view.
-
-Claude takes action on the page using explicit references to DOM elements (e.g. ref_123) using the "left_click" action of the "computer" tool and the "form_input" tool whenever possible and only uses coordinate-based actions when references fail or if Claude needs to use an action that doesn't support references (e.g. dragging).
-
-Claude avoids repeatedly scrolling down the page to read long web pages, instead Claude uses the "get_page_text" tool and "read_page" tools to efficiently read the content.
-
-Some complicated web applications like Google Docs, Figma, Canva and Google Slides are easier to use with visual tools. If Claude does not find meaningful content on the page when using the "read_page" tool, then Claude uses screenshots to see the content.
-</tool_usage_requirements>`,
-    },
-    {
-      type: 'text',
-      text: `Platform-specific information:
-- You are on a Mac system
-- Use "cmd" as the modifier key for keyboard shortcuts (e.g., "cmd+a" for select all, "cmd+c" for copy, "cmd+v" for paste)`,
-    },
-    {
-      type: 'text',
-      text: `<browser_tabs_usage>
-You have the ability to work with multiple browser tabs simultaneously. This allows you to be more efficient by working on different tasks in parallel.
-## Getting Tab Information
-IMPORTANT: If you don't have a valid tab ID, you can call the "tabs_context" tool first to get the list of available tabs:
-- tabs_context: {} (no parameters needed - returns all tabs in the current group)
-## Tab Context Information
-Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result, but may contain tab context information.
-After a tool execution or user message, you may receive tab context as <system-reminder> if the tab context has changed, showing available tabs in JSON format.
-Example tab context:
-<system-reminder>{"availableTabs":[{"tabId":<TAB_ID_1>,"title":"Google","url":"https://google.com"},{"tabId":<TAB_ID_2>,"title":"GitHub","url":"https://github.com"}],"initialTabId":<TAB_ID_1>,"domainSkills":[{"domain":"google.com","skill":"Search tips..."}]}</system-reminder>
-The "initialTabId" field indicates the tab where the user interacts with Claude and is what the user may refer to as "this tab" or "this page".
-The "domainSkills" field contains domain-specific guidance and best practices for working with particular websites.
-## Using the tabId Parameter (REQUIRED)
-The tabId parameter is REQUIRED for all tools that interact with tabs. You must always specify which tab to use:
-- computer tool: {"action": "screenshot", "tabId": <TAB_ID>}
-- navigate tool: {"url": "https://example.com", "tabId": <TAB_ID>}
-- read_page tool: {"tabId": <TAB_ID>}
-- find tool: {"query": "search button", "tabId": <TAB_ID>}
-- get_page_text tool: {"tabId": <TAB_ID>}
-- form_input tool: {"ref": "ref_1", "value": "text", "tabId": <TAB_ID>}
-## Creating New Tabs
-Use the tabs_create tool to create new empty tabs:
-- tabs_create: {} (creates a new tab at chrome://newtab in the current group)
-## Best Practices
-- ALWAYS call the "tabs_context" tool first if you don't have a valid tab ID
-- Use multiple tabs to work more efficiently (e.g., researching in one tab while filling forms in another)
-- Pay attention to the tab context after each tool use to see updated tab information
-- Remember that new tabs created by clicking links or using the "tabs_create" tool will automatically be added to your available tabs
-- Each tab maintains its own state (scroll position, loaded page, etc.)
-## Tab Management
-- Tabs are automatically grouped together when you create them through navigation, clicking, or "tabs_create"
-- Tab IDs are unique numbers that identify each tab
-- Tab titles and URLs help you identify which tab to use for specific tasks
-</browser_tabs_usage>`,
-    },
-    {
-      type: 'text',
-      text: `<turn_answer_start_instructions>
-Before outputting any text response to the user this turn, call turn_answer_start first.
-
-WITH TOOL CALLS: After completing all tool calls, call turn_answer_start, then write your response.
-WITHOUT TOOL CALLS: Call turn_answer_start immediately, then write your response.
-
-RULES:
-- Call exactly once per turn
-- Call immediately before your text response
-- NEVER call during intermediate thoughts, reasoning, or while planning to use more tools
-- No more tools after calling this
-</turn_answer_start_instructions>`,
-      cache_control: { type: 'ephemeral' },
-    },
-  ];
 }
 
 // ============================================
@@ -823,109 +559,6 @@ async function ensureContentScripts(tabId) {
 async function sendToContent(tabId, type, payload = {}) {
   await ensureContentScripts(tabId);
   return await chrome.tabs.sendMessage(tabId, { type, payload }, { frameId: 0 });
-}
-
-// ============================================
-// KEY DEFINITIONS
-// ============================================
-
-const KEY_DEFINITIONS = {
-  enter: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
-  return: { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
-  tab: { key: 'Tab', code: 'Tab', keyCode: 9 },
-  delete: { key: 'Delete', code: 'Delete', keyCode: 46 },
-  backspace: { key: 'Backspace', code: 'Backspace', keyCode: 8 },
-  escape: { key: 'Escape', code: 'Escape', keyCode: 27 },
-  esc: { key: 'Escape', code: 'Escape', keyCode: 27 },
-  space: { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
-  ' ': { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
-  arrowup: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-  arrowdown: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-  arrowleft: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-  arrowright: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-  up: { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 },
-  down: { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
-  left: { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
-  right: { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-  home: { key: 'Home', code: 'Home', keyCode: 36 },
-  end: { key: 'End', code: 'End', keyCode: 35 },
-  pageup: { key: 'PageUp', code: 'PageUp', keyCode: 33 },
-  pagedown: { key: 'PageDown', code: 'PageDown', keyCode: 34 },
-  f1: { key: 'F1', code: 'F1', keyCode: 112 },
-  f2: { key: 'F2', code: 'F2', keyCode: 113 },
-  f3: { key: 'F3', code: 'F3', keyCode: 114 },
-  f4: { key: 'F4', code: 'F4', keyCode: 115 },
-  f5: { key: 'F5', code: 'F5', keyCode: 116 },
-  f6: { key: 'F6', code: 'F6', keyCode: 117 },
-  f7: { key: 'F7', code: 'F7', keyCode: 118 },
-  f8: { key: 'F8', code: 'F8', keyCode: 119 },
-  f9: { key: 'F9', code: 'F9', keyCode: 120 },
-  f10: { key: 'F10', code: 'F10', keyCode: 121 },
-  f11: { key: 'F11', code: 'F11', keyCode: 122 },
-  f12: { key: 'F12', code: 'F12', keyCode: 123 },
-};
-
-function getKeyCode(key) {
-  const lowerKey = key.toLowerCase();
-  const def = KEY_DEFINITIONS[lowerKey];
-  if (def) return def;
-
-  if (key.length === 1) {
-    const upper = key.toUpperCase();
-    let code;
-    if (upper >= 'A' && upper <= 'Z') {
-      code = `Key${upper}`;
-    } else if (key >= '0' && key <= '9') {
-      code = `Digit${key}`;
-    } else {
-      return null;
-    }
-    return { key, code, keyCode: upper.charCodeAt(0), text: key };
-  }
-  return null;
-}
-
-function requiresShift(char) {
-  return '~!@#$%^&*()_+{}|:"<>?'.includes(char) || (char >= 'A' && char <= 'Z');
-}
-
-async function pressKey(tabId, keyDef, modifiers = 0) {
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-    type: keyDef.text ? 'keyDown' : 'rawKeyDown',
-    key: keyDef.key,
-    code: keyDef.code,
-    windowsVirtualKeyCode: keyDef.keyCode,
-    modifiers,
-    text: keyDef.text || '',
-    unmodifiedText: keyDef.text || '',
-  });
-  await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchKeyEvent', {
-    type: 'keyUp',
-    key: keyDef.key,
-    code: keyDef.code,
-    windowsVirtualKeyCode: keyDef.keyCode,
-    modifiers,
-  });
-}
-
-async function pressKeyChord(tabId, chord) {
-  const parts = chord.toLowerCase().split('+');
-  let mainKey = '';
-  const modMap = { alt: 1, option: 1, ctrl: 2, control: 2, meta: 4, cmd: 4, command: 4, shift: 8 };
-  let modifiers = 0;
-
-  for (const part of parts) {
-    if (modMap[part] !== undefined) {
-      modifiers |= modMap[part];
-    } else {
-      mainKey = part;
-    }
-  }
-
-  if (mainKey) {
-    const keyDef = getKeyCode(mainKey);
-    if (keyDef) await pressKey(tabId, keyDef, modifiers);
-  }
 }
 
 // ============================================
@@ -1684,184 +1317,6 @@ ERROR: explanation`;
 }
 
 // ============================================
-// CLAUDE API
-// ============================================
-
-async function loadConfig() {
-  const stored = await chrome.storage.local.get([
-    'apiBaseUrl', 'apiKey', 'model', 'maxSteps', 'maxTokens',
-    'providerKeys', 'customModels', 'currentModelIndex'
-  ]);
-  config = { ...config, ...stored };
-  return config;
-}
-
-function getApiHeaders() {
-  const headers = {
-    'Content-Type': 'application/json',
-    'anthropic-version': '2023-06-01',
-    'anthropic-beta': 'computer-use-2025-01-24',
-  };
-  if (config.apiKey) {
-    // Support both Anthropic and OpenAI/OpenRouter style auth
-    headers['x-api-key'] = config.apiKey;
-    headers['Authorization'] = `Bearer ${config.apiKey}`;
-  }
-  return headers;
-}
-
-async function callClaudeSimple(prompt, maxTokens = 800) {
-  await loadConfig();
-  const response = await fetch(config.apiBaseUrl, {
-    method: 'POST',
-    headers: getApiHeaders(),
-    body: JSON.stringify({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
-  if (!response.ok) throw new Error(`API error: ${response.status}`);
-  const result = await response.json();
-  return result.content?.find(b => b.type === 'text')?.text || '';
-}
-
-async function callClaude(messages, onTextChunk = null) {
-  await loadConfig();
-  await log('API', `Calling API (${config.model})`, { messageCount: messages.length });
-
-  const useStreaming = onTextChunk !== null;
-
-  // Use abort signal for cancellation
-  const signal = abortController?.signal;
-
-  const response = await fetch(config.apiBaseUrl, {
-    method: 'POST',
-    headers: getApiHeaders(),
-    body: JSON.stringify({
-      model: config.model,
-      max_tokens: config.maxTokens || 10000,
-      system: buildSystemPrompt(),
-      tools: TOOL_DEFINITIONS,
-      messages,
-      stream: useStreaming,
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`API error: ${response.status} ${error}`);
-  }
-
-  // Handle streaming response
-  if (useStreaming) {
-    return await handleStreamingResponse(response, onTextChunk);
-  }
-
-  const result = await response.json();
-  await log('API', 'Response received', { stopReason: result.stop_reason });
-  return result;
-}
-
-/**
- * Handle SSE streaming response
- */
-async function handleStreamingResponse(response, onTextChunk) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-
-  let result = {
-    content: [],
-    stop_reason: null,
-  };
-
-  let currentTextBlock = null;
-  let currentToolUse = null;
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6);
-      if (data === '[DONE]') continue;
-
-      try {
-        const event = JSON.parse(data);
-
-        switch (event.type) {
-          case 'content_block_start':
-            if (event.content_block.type === 'text') {
-              currentTextBlock = { type: 'text', text: '' };
-            } else if (event.content_block.type === 'tool_use') {
-              currentToolUse = {
-                type: 'tool_use',
-                id: event.content_block.id,
-                name: event.content_block.name,
-                input: {},
-              };
-            }
-            break;
-
-          case 'content_block_delta':
-            if (event.delta.type === 'text_delta' && currentTextBlock) {
-              currentTextBlock.text += event.delta.text;
-              if (onTextChunk) onTextChunk(event.delta.text);
-            } else if (event.delta.type === 'input_json_delta' && currentToolUse) {
-              // Accumulate JSON input
-              currentToolUse._inputJson = (currentToolUse._inputJson || '') + event.delta.partial_json;
-            }
-            break;
-
-          case 'content_block_stop':
-            if (currentTextBlock) {
-              result.content.push(currentTextBlock);
-              currentTextBlock = null;
-            } else if (currentToolUse) {
-              // Parse accumulated JSON and create clean object
-              let parsedInput = {};
-              if (currentToolUse._inputJson) {
-                try {
-                  parsedInput = JSON.parse(currentToolUse._inputJson);
-                } catch (e) {
-                  parsedInput = {};
-                }
-              }
-              // Push clean object without _inputJson
-              result.content.push({
-                type: 'tool_use',
-                id: currentToolUse.id,
-                name: currentToolUse.name,
-                input: parsedInput,
-              });
-              currentToolUse = null;
-            }
-            break;
-
-          case 'message_delta':
-            if (event.delta.stop_reason) {
-              result.stop_reason = event.delta.stop_reason;
-            }
-            break;
-        }
-      } catch (e) {
-        // Ignore JSON parse errors for malformed events
-      }
-    }
-  }
-
-  await log('API', 'Streaming response complete', { stopReason: result.stop_reason });
-  return result;
-}
-
-// ============================================
 // AGENT LOOP
 // ============================================
 
@@ -1921,7 +1376,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
   // Continue from existing history or start fresh
   const messages = [...existingHistory, { role: 'user', content: userContent }];
   let steps = 0;
-  const maxSteps = config.maxSteps || 50;
+  const maxSteps = getConfig().maxSteps || 50;
 
   while (steps < maxSteps) {
     // Check if task was cancelled
@@ -1941,7 +1396,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
 
     let response;
     try {
-      response = await callClaude(messages, onTextChunk);
+      response = await callClaude(messages, onTextChunk, log);
     } catch (error) {
       // Handle abort gracefully
       if (error.name === 'AbortError' || taskCancelled) {
@@ -2026,7 +1481,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, image = null
   taskScreenshots = [];
 
   // Create new abort controller for this task
-  abortController = new AbortController();
+  createAbortController();
   const startTime = new Date().toISOString();
   currentTask = { tabId, task, status: 'running', steps: [], startTime };
 
@@ -2120,7 +1575,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
     case 'SAVE_CONFIG':
       chrome.storage.local.set(payload).then(() => {
-        config = { ...config, ...payload };
+        setConfig(payload);
         sendResponse({ success: true });
       });
       return true;
@@ -2156,10 +1611,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     case 'STOP_TASK':
       taskCancelled = true;
       // Abort any ongoing API call
-      if (abortController) {
-        abortController.abort();
-        abortController = null;
-      }
+      abortRequest();
       // Also resolve any pending plan approval
       if (pendingPlanResolve) {
         pendingPlanResolve({ approved: false });
