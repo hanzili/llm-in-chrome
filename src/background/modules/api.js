@@ -105,6 +105,31 @@ export async function callClaudeSimple(prompt, maxTokens = 800) {
 }
 
 /**
+ * Add cache_control to the last assistant message for conversation caching.
+ * This matches Claude in Chrome's caching strategy.
+ */
+function addConversationCaching(messages) {
+  if (!messages || messages.length === 0) return messages;
+
+  // Deep clone to avoid mutating original
+  const cachedMessages = JSON.parse(JSON.stringify(messages));
+
+  // Find last assistant message
+  for (let i = cachedMessages.length - 1; i >= 0; i--) {
+    if (cachedMessages[i].role === 'assistant') {
+      const content = cachedMessages[i].content;
+      if (Array.isArray(content) && content.length > 0) {
+        // Add cache_control to the last content block
+        content[content.length - 1].cache_control = { type: 'ephemeral' };
+      }
+      break;
+    }
+  }
+
+  return cachedMessages;
+}
+
+/**
  * Main Claude API call with tools and streaming support
  */
 export async function callClaude(messages, onTextChunk = null, log = () => {}) {
@@ -114,6 +139,9 @@ export async function callClaude(messages, onTextChunk = null, log = () => {}) {
   const useStreaming = onTextChunk !== null;
   const signal = abortController?.signal;
 
+  // Add conversation caching to messages
+  const cachedMessages = addConversationCaching(messages);
+
   const response = await fetch(config.apiBaseUrl, {
     method: 'POST',
     headers: getApiHeaders(),
@@ -122,7 +150,7 @@ export async function callClaude(messages, onTextChunk = null, log = () => {}) {
       max_tokens: config.maxTokens || 10000,
       system: buildSystemPrompt(),
       tools: TOOL_DEFINITIONS,
-      messages,
+      messages: cachedMessages,
       stream: useStreaming,
     }),
     signal,
