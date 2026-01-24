@@ -481,6 +481,9 @@ async function detachDebugger() {
   try {
     await chrome.debugger.detach({ tabId: debuggerTabId });
   } catch (err) {}
+  debuggerAttached = false;
+  debuggerTabId = null;
+}
 
 // ============================================
 // VISUAL INDICATORS
