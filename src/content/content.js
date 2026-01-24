@@ -49,6 +49,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       handleFindAndScroll(payload, sendResponse);
       return true;
 
+    case 'GET_ELEMENT_SELECTOR':
+      handleGetElementSelector(payload, sendResponse);
+      return true;
+
     default:
       sendResponse({ error: `Unknown message type: ${type}` });
       return false;
@@ -288,6 +292,77 @@ function handleGetElementRect(payload, sendResponse) {
   } catch (error) {
     sendResponse({ success: false, error: error.message });
   }
+}
+
+/**
+ * Handle get element selector - returns a unique CSS selector for an element
+ */
+function handleGetElementSelector(payload, sendResponse) {
+  try {
+    const { ref } = payload;
+    const element = window.__getElementByRef(ref);
+
+    if (!element) {
+      sendResponse({ success: false, error: `Element ${ref} not found` });
+      return;
+    }
+
+    // Generate a unique CSS selector for the element
+    const selector = generateUniqueSelector(element);
+    sendResponse({ success: true, selector });
+  } catch (error) {
+    sendResponse({ success: false, error: error.message });
+  }
+}
+
+/**
+ * Generate a unique CSS selector for an element
+ */
+function generateUniqueSelector(element) {
+  // If element has an ID, use it
+  if (element.id) {
+    return `#${CSS.escape(element.id)}`;
+  }
+
+  // Build a path-based selector
+  const path = [];
+  let current = element;
+
+  while (current && current !== document.body && current !== document.documentElement) {
+    let selector = current.tagName.toLowerCase();
+
+    // Add class names if present
+    if (current.className && typeof current.className === 'string') {
+      const classes = current.className.trim().split(/\s+/).filter(c => c);
+      if (classes.length > 0) {
+        selector += '.' + classes.map(c => CSS.escape(c)).join('.');
+      }
+    }
+
+    // Add nth-child if needed for uniqueness
+    const parent = current.parentElement;
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(
+        child => child.tagName === current.tagName
+      );
+      if (siblings.length > 1) {
+        const index = siblings.indexOf(current) + 1;
+        selector += `:nth-of-type(${index})`;
+      }
+    }
+
+    path.unshift(selector);
+    current = current.parentElement;
+
+    // Check if current path uniquely identifies the element
+    const testSelector = path.join(' > ');
+    const matches = document.querySelectorAll(testSelector);
+    if (matches.length === 1 && matches[0] === element) {
+      return testSelector;
+    }
+  }
+
+  return path.join(' > ');
 }
 
 /**

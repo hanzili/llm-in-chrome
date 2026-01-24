@@ -476,6 +476,45 @@ export const TOOL_DEFINITIONS = [
       type: 'ephemeral',
     },
   },
+
+  {
+    name: 'file_upload',
+    description: `Upload a file to a file input element on the page. This tool sets files on <input type="file"> elements. You can provide either a ref to the file input element or a CSS selector. The file can be provided as a URL (which will be downloaded first) or as base64 data. Use this for uploading resumes, images, documents, etc. to web forms.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        ref: {
+          type: 'string',
+          description: 'Reference ID of the file input element (e.g., "ref_123"). Get this from read_page or find tools.',
+        },
+        selector: {
+          type: 'string',
+          description: 'CSS selector for the file input element (e.g., "input[type=file]", "#resume-upload"). Used if ref is not provided.',
+        },
+        fileUrl: {
+          type: 'string',
+          description: 'URL of the file to upload. The file will be downloaded and then uploaded to the input.',
+        },
+        base64Data: {
+          type: 'string',
+          description: 'Base64 encoded file data (without the data URL prefix). Use this for files already in memory.',
+        },
+        fileName: {
+          type: 'string',
+          description: 'Name for the file (e.g., "resume.pdf", "photo.jpg"). Required when using base64Data.',
+        },
+        mimeType: {
+          type: 'string',
+          description: 'MIME type of the file (e.g., "application/pdf", "image/jpeg"). Helps with proper file handling.',
+        },
+        tabId: {
+          type: 'number',
+          description: 'Tab ID where the file input is located. Use tabs_context first if you don\'t have a valid tab ID.',
+        },
+      },
+      required: ['tabId'],
+    },
+  },
 ];
 
 export default TOOL_DEFINITIONS;

@@ -1102,6 +1102,158 @@ ERROR: explanation`;
     }
 
     // ----------------------------------------
+    // FILE_UPLOAD TOOL
+    // ----------------------------------------
+    case 'file_upload': {
+      try {
+        await ensureDebugger(tabId);
+
+        // Find the file input element
+        let nodeId;
+        if (toolInput.ref) {
+          // Use ref to find the element
+          const result = await sendToContent(tabId, 'GET_ELEMENT_SELECTOR', { ref: toolInput.ref });
+          if (!result.success) {
+            return `Error: Could not find element with ref ${toolInput.ref}`;
+          }
+          // Get the DOM node using the selector
+          const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument');
+          const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+            nodeId: doc.root.nodeId,
+            selector: result.selector,
+          });
+          nodeId = node.nodeId;
+        } else if (toolInput.selector) {
+          // Use CSS selector directly
+          const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument');
+          const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+            nodeId: doc.root.nodeId,
+            selector: toolInput.selector,
+          });
+          if (!node.nodeId) {
+            return `Error: Could not find element with selector "${toolInput.selector}"`;
+          }
+          nodeId = node.nodeId;
+        } else {
+          return 'Error: Either ref or selector must be provided';
+        }
+
+        // Verify it's a file input
+        const nodeInfo = await chrome.debugger.sendCommand({ tabId }, 'DOM.describeNode', { nodeId });
+        if (nodeInfo.node.nodeName !== 'INPUT') {
+          return `Error: Element is not an input element (found: ${nodeInfo.node.nodeName})`;
+        }
+
+        // Determine file source and prepare the file
+        let filePath;
+        const fileName = toolInput.fileName || 'uploaded_file';
+
+        if (toolInput.fileUrl) {
+          // Download file from URL
+          const downloadId = await new Promise((resolve, reject) => {
+            chrome.downloads.download({
+              url: toolInput.fileUrl,
+              filename: `browser-agent-uploads/${fileName}`,
+              conflictAction: 'uniquify',
+            }, (id) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(id);
+              }
+            });
+          });
+
+          // Wait for download to complete
+          filePath = await new Promise((resolve, reject) => {
+            const listener = (delta) => {
+              if (delta.id === downloadId) {
+                if (delta.state?.current === 'complete') {
+                  chrome.downloads.onChanged.removeListener(listener);
+                  chrome.downloads.search({ id: downloadId }, (results) => {
+                    if (results && results[0]) {
+                      resolve(results[0].filename);
+                    } else {
+                      reject(new Error('Could not find downloaded file'));
+                    }
+                  });
+                } else if (delta.state?.current === 'interrupted') {
+                  chrome.downloads.onChanged.removeListener(listener);
+                  reject(new Error('Download interrupted'));
+                }
+              }
+            };
+            chrome.downloads.onChanged.addListener(listener);
+
+            // Timeout after 60 seconds
+            setTimeout(() => {
+              chrome.downloads.onChanged.removeListener(listener);
+              reject(new Error('Download timeout'));
+            }, 60000);
+          });
+        } else if (toolInput.base64Data) {
+          // Create file from base64 data
+          const mimeType = toolInput.mimeType || 'application/octet-stream';
+          const dataUrl = `data:${mimeType};base64,${toolInput.base64Data}`;
+
+          const downloadId = await new Promise((resolve, reject) => {
+            chrome.downloads.download({
+              url: dataUrl,
+              filename: `browser-agent-uploads/${fileName}`,
+              conflictAction: 'uniquify',
+            }, (id) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(id);
+              }
+            });
+          });
+
+          // Wait for download to complete
+          filePath = await new Promise((resolve, reject) => {
+            const listener = (delta) => {
+              if (delta.id === downloadId) {
+                if (delta.state?.current === 'complete') {
+                  chrome.downloads.onChanged.removeListener(listener);
+                  chrome.downloads.search({ id: downloadId }, (results) => {
+                    if (results && results[0]) {
+                      resolve(results[0].filename);
+                    } else {
+                      reject(new Error('Could not find downloaded file'));
+                    }
+                  });
+                } else if (delta.state?.current === 'interrupted') {
+                  chrome.downloads.onChanged.removeListener(listener);
+                  reject(new Error('Download interrupted'));
+                }
+              }
+            };
+            chrome.downloads.onChanged.addListener(listener);
+
+            // Timeout after 30 seconds
+            setTimeout(() => {
+              chrome.downloads.onChanged.removeListener(listener);
+              reject(new Error('File creation timeout'));
+            }, 30000);
+          });
+        } else {
+          return 'Error: Either fileUrl or base64Data must be provided';
+        }
+
+        // Use CDP to set the file on the input element
+        await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
+          files: [filePath],
+          nodeId: nodeId,
+        });
+
+        return `Successfully uploaded file "${fileName}" to the file input element`;
+      } catch (err) {
+        return `Error uploading file: ${err.message}`;
+      }
+    }
+
+    // ----------------------------------------
     // TABS_CONTEXT TOOL
     // ----------------------------------------
     case 'tabs_context': {
