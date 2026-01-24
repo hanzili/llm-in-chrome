@@ -398,14 +398,17 @@ function handleClickRef(payload, sendResponse) {
       return;
     }
 
-    element.scrollIntoView({ behavior: 'instant', block: 'center' });
+    // Scroll into view EXACTLY like Claude in Chrome
+    element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
 
-    // Small delay to ensure scroll completes
-    setTimeout(() => {
-      element.focus();
-      element.click();
-      sendResponse({ success: true });
-    }, 100);
+    // Force reflow like Claude in Chrome
+    if (element instanceof HTMLElement) {
+      void element.offsetHeight;
+    }
+
+    element.focus();
+    element.click();
+    sendResponse({ success: true });
   } catch (error) {
     sendResponse({ success: false, error: error.message });
   }
@@ -587,12 +590,9 @@ function handleFindAndScroll(payload, sendResponse) {
     }
 
     // If we found a scrollable container (not body/html), scroll it
+    // Claude in Chrome uses behavior: "instant" for immediate scroll
     if (scrollContainer && scrollContainer !== document.body && scrollContainer !== document.documentElement && isScrollable(scrollContainer)) {
-      if (direction === 'up' || direction === 'down') {
-        scrollContainer.scrollBy({ top: deltaY, behavior: 'smooth' });
-      } else {
-        scrollContainer.scrollBy({ left: deltaX, behavior: 'smooth' });
-      }
+      scrollContainer.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
       sendResponse({
         scrolledContainer: true,
         containerType: scrollContainer.tagName.toLowerCase(),
@@ -600,11 +600,12 @@ function handleFindAndScroll(payload, sendResponse) {
       return;
     }
 
-    // No scrollable container found, let caller use fallback
-    sendResponse({ scrolledContainer: false });
+    // Fallback: scroll the window itself (like Claude in Chrome)
+    window.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
+    sendResponse({ scrolledContainer: true, containerType: 'window' });
   } catch (error) {
     sendResponse({ scrolledContainer: false, error: error.message });
   }
 }
 
-console.log('[Browser Agent] Content script loaded');
+console.log('[LLM in Chrome] Content script loaded');

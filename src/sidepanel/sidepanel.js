@@ -1,5 +1,5 @@
 /**
- * Side Panel - Chat interface for Browser Agent
+ * Side Panel - Chat interface for LLM in Chrome
  */
 
 // Provider configurations
@@ -18,30 +18,33 @@ const PROVIDERS = {
     name: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1/chat/completions',
     models: [
+      { id: 'gpt-5', name: 'GPT-5' },
+      { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
+      { id: 'gpt-4.1', name: 'GPT-4.1' },
       { id: 'gpt-4o', name: 'GPT-4o' },
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
-      { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
-      { id: 'o1', name: 'o1' },
-      { id: 'o3-mini', name: 'o3-mini' },
+      { id: 'o3', name: 'o3' },
+      { id: 'o4-mini', name: 'o4-mini' },
     ],
   },
   google: {
     name: 'Google',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
     models: [
-      { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
-      { id: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro' },
+      { id: 'gemini-3-pro', name: 'Gemini 3 Pro' },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
     ],
   },
   openrouter: {
     name: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
     models: [
-      { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet' },
-      { id: 'anthropic/claude-3-opus', name: 'Claude 3 Opus' },
-      { id: 'openai/gpt-4o', name: 'GPT-4o' },
-      { id: 'google/gemini-2.0-flash-001', name: 'Gemini 2.0 Flash' },
-      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
+      { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4' },
+      { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4' },
+      { id: 'openai/gpt-5', name: 'GPT-5' },
+      { id: 'openai/o3', name: 'o3' },
+      { id: 'google/gemini-3-pro', name: 'Gemini 3 Pro' },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
     ],
   },
 };
@@ -918,9 +921,10 @@ function updateStepsSection() {
       </div>
       <div class="steps-list"></div>
     `;
-    const toggle = stepsSection.querySelector('.steps-toggle');
-    const list = stepsSection.querySelector('.steps-list');
-    toggle.addEventListener('click', () => {
+    // Use event delegation - query elements fresh on each click
+    stepsSection.querySelector('.steps-toggle').addEventListener('click', (e) => {
+      const toggle = stepsSection.querySelector('.steps-toggle');
+      const list = stepsSection.querySelector('.steps-list');
       toggle.classList.toggle('expanded');
       list.classList.toggle('visible');
     });

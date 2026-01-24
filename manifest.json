@@ -1,8 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Browser Agent",
+  "name": "LLM in Chrome",
   "version": "0.2.0",
-  "description": "AI-powered browser automation assistant",
+  "description": "LLM-agnostic browser automation assistant",
+
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
 
   "permissions": [
     "activeTab",
@@ -20,7 +27,12 @@
   ],
 
   "action": {
-    "default_title": "Browser Agent"
+    "default_title": "LLM in Chrome",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
   },
 
   "side_panel": {

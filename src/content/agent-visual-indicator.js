@@ -2,7 +2,7 @@
  * Agent Visual Indicator
  *
  * Shows visual feedback on the page when the agent is working:
- * - Pulsing orange glow border around the viewport
+ * - Pulsing teal glow border around the viewport
  * - "Stop" button at the bottom of the page
  * - Static indicator when agent is active in tab group
  *
@@ -30,21 +30,21 @@
       @keyframes agent-pulse {
         0% {
           box-shadow:
-            inset 0 0 10px rgba(217, 119, 87, 0.5),
-            inset 0 0 20px rgba(217, 119, 87, 0.3),
-            inset 0 0 30px rgba(217, 119, 87, 0.1);
+            inset 0 0 10px rgba(93, 154, 154, 0.5),
+            inset 0 0 20px rgba(93, 154, 154, 0.3),
+            inset 0 0 30px rgba(93, 154, 154, 0.1);
         }
         50% {
           box-shadow:
-            inset 0 0 15px rgba(217, 119, 87, 0.7),
-            inset 0 0 25px rgba(217, 119, 87, 0.5),
-            inset 0 0 35px rgba(217, 119, 87, 0.2);
+            inset 0 0 15px rgba(93, 154, 154, 0.7),
+            inset 0 0 25px rgba(93, 154, 154, 0.5),
+            inset 0 0 35px rgba(93, 154, 154, 0.2);
         }
         100% {
           box-shadow:
-            inset 0 0 10px rgba(217, 119, 87, 0.5),
-            inset 0 0 20px rgba(217, 119, 87, 0.3),
-            inset 0 0 30px rgba(217, 119, 87, 0.1);
+            inset 0 0 10px rgba(93, 154, 154, 0.5),
+            inset 0 0 20px rgba(93, 154, 154, 0.3),
+            inset 0 0 30px rgba(93, 154, 154, 0.1);
         }
       }
     `;
@@ -67,9 +67,9 @@
       transition: opacity 0.3s ease-in-out;
       animation: agent-pulse 2s ease-in-out infinite;
       box-shadow:
-        inset 0 0 10px rgba(217, 119, 87, 0.5),
-        inset 0 0 20px rgba(217, 119, 87, 0.3),
-        inset 0 0 30px rgba(217, 119, 87, 0.1);
+        inset 0 0 10px rgba(93, 154, 154, 0.5),
+        inset 0 0 20px rgba(93, 154, 154, 0.3),
+        inset 0 0 30px rgba(93, 154, 154, 0.1);
     `;
     return el;
   }
@@ -114,8 +114,8 @@
       align-items: center;
       justify-content: center;
       box-shadow:
-        0 40px 80px rgba(217, 119, 87, 0.24),
-        0 4px 14px rgba(217, 119, 87, 0.24);
+        0 40px 80px rgba(93, 154, 154, 0.24),
+        0 4px 14px rgba(93, 154, 154, 0.24);
       transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
       opacity: 0;
       user-select: none;
@@ -154,7 +154,7 @@
     el.id = 'agent-static-indicator';
     el.innerHTML = `
       <svg width="16" height="16" viewBox="0 0 16 16" fill="none" style="width: 16px; height: 16px; margin-right: 8px; vertical-align: middle;">
-        <circle cx="8" cy="8" r="6" fill="#D97757"/>
+        <circle cx="8" cy="8" r="6" fill="#5D9A9A"/>
       </svg>
       <span style="vertical-align: middle; color: #141413; font-size: 14px;">Agent is active</span>
       <button id="agent-static-close" style="
@@ -358,5 +358,5 @@
     hideStaticIndicator();
   });
 
-  console.log('[Browser Agent] Visual indicator script loaded');
+  console.log('[LLM in Chrome] Visual indicator script loaded');
 })();

@@ -6,14 +6,14 @@
 export const TOOL_DEFINITIONS = [
   {
     name: 'read_page',
-    description: `Get an accessibility tree representation of elements on the page. By default returns all elements including non-visible ones. Output is limited to 50000 characters. If the output exceeds this limit, you will receive an error asking you to specify a smaller depth or focus on a specific element using ref_id. Optionally filter for only interactive elements. If you don't have a valid tab ID, use tabs_context first to get available tabs.`,
+    description: `Get an accessibility tree representation of elements on the page. By default returns only interactive elements (buttons, links, inputs). IMPORTANT: Only use ref IDs that appear in the current output - do not use refs from previous calls as they may no longer be valid. If you don't have a valid tab ID, use tabs_context first.`,
     input_schema: {
       type: 'object',
       properties: {
         filter: {
           type: 'string',
           enum: ['interactive', 'all'],
-          description: 'Filter elements: "interactive" for buttons/links/inputs only, "all" for all elements including non-visible ones (default: all elements)',
+          description: 'Filter elements: "interactive" for buttons/links/inputs only (default), "all" for all elements including semantic/structural ones',
         },
         tabId: {
           type: 'number',
@@ -411,7 +411,7 @@ export const TOOL_DEFINITIONS = [
           properties: {
             showClickIndicators: {
               type: 'boolean',
-              description: 'Show orange circles at click locations (default: true)',
+              description: 'Show teal circles at click locations (default: true)',
             },
             showDragPaths: {
               type: 'boolean',
@@ -423,7 +423,7 @@ export const TOOL_DEFINITIONS = [
             },
             showProgressBar: {
               type: 'boolean',
-              description: 'Show orange progress bar at bottom (default: true)',
+              description: 'Show teal progress bar at bottom (default: true)',
             },
             showWatermark: {
               type: 'boolean',
@@ -472,14 +472,11 @@ export const TOOL_DEFINITIONS = [
       },
       required: ['action', 'text', 'tabId'],
     },
-    cache_control: {
-      type: 'ephemeral',
-    },
   },
 
   {
     name: 'file_upload',
-    description: `Upload a file to a file input element on the page. This tool sets files on <input type="file"> elements. You can provide either a ref to the file input element or a CSS selector. The file can be provided as a URL (which will be downloaded first) or as base64 data. Use this for uploading resumes, images, documents, etc. to web forms.`,
+    description: `Upload a file to a file input element on the page. This tool sets files on <input type="file"> elements. You can provide either a ref to the file input element or a CSS selector. Provide either a local file path (filePath) or a URL (fileUrl) which will be downloaded first. Use this for uploading resumes, images, documents, etc. to web forms.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -499,17 +496,9 @@ export const TOOL_DEFINITIONS = [
           type: 'string',
           description: 'URL of the file to upload. The file will be downloaded first, then uploaded to the input.',
         },
-        base64Data: {
-          type: 'string',
-          description: 'Base64 encoded file data (without the data URL prefix). Use this for files already in memory.',
-        },
         fileName: {
           type: 'string',
-          description: 'Name for the file (e.g., "resume.pdf", "photo.jpg"). Required when using base64Data.',
-        },
-        mimeType: {
-          type: 'string',
-          description: 'MIME type of the file (e.g., "application/pdf", "image/jpeg"). Helps with proper file handling.',
+          description: 'Name for the downloaded file (e.g., "resume.pdf"). Used with fileUrl.',
         },
         tabId: {
           type: 'number',
@@ -517,6 +506,9 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['tabId'],
+    },
+    cache_control: {
+      type: 'ephemeral',
     },
   },
 ];

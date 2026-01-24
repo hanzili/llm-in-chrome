@@ -1,5 +1,5 @@
 /**
- * Service Worker - Browser Agent
+ * Service Worker - LLM in Chrome
  *
  * Orchestrates browser automation by:
  * 1. Receiving tasks from the sidepanel
@@ -32,6 +32,9 @@ async function log(type, message, data = null) {
     data: data ? JSON.stringify(data).substring(0, 500) : null,
   };
   console.log(`[${type}] ${message}`, data || '');
+
+  // Also collect in taskDebugLog for saving to file
+  taskDebugLog.push(entry);
 
   // Save to storage
   const stored = await chrome.storage.local.get([LOG_KEY]);
@@ -66,6 +69,7 @@ async function saveTaskLogs(taskData, screenshots = []) {
         : null,
       turns: buildCleanTurns(taskData.messages || []),
       screenshots: screenshots.map((_, i) => `screenshot_${i + 1}.png`),
+      debug: taskDebugLog.filter(e => ['DPR', 'CLICK', 'WINDOW TRACKING', 'TAB TRACKING'].includes(e.type)),
       error: taskData.error || null,
     };
 
@@ -166,8 +170,11 @@ async function getTabDPR(tabId) {
       target: { tabId },
       func: () => window.devicePixelRatio || 1,
     });
-    return results[0]?.result || 1;
-  } catch {
+    const dpr = results[0]?.result || 1;
+    await log('DPR', `Tab ${tabId}: devicePixelRatio = ${dpr}`);
+    return dpr;
+  } catch (err) {
+    await log('DPR', `Tab ${tabId}: Failed to get DPR, defaulting to 1. Error: ${err.message}`);
     return 1; // Default to 1 if we can't get it
   }
 }
@@ -260,6 +267,7 @@ let debuggerListenerRegistered = false;
 let capturedScreenshots = new Map();
 let screenshotCounter = 0;
 let taskScreenshots = []; // Screenshots collected during task for logging
+let taskDebugLog = []; // Debug entries collected during task for logging
 
 // Screenshot context tracking (like Claude in Chrome)
 // Maps screenshot ID to {viewportWidth, viewportHeight, screenshotWidth, screenshotHeight, devicePixelRatio}
@@ -287,6 +295,97 @@ function generateSessionId() {
 // Tab group state
 let sessionTabGroupId = null;
 
+// Track tabs opened BY agent actions (popups, new windows from clicks)
+const agentOpenedTabs = new Set();
+
+// Track if we're currently in an active agent session
+let agentSessionActive = false;
+
+// Listen for new tabs and track ones that might be opened by agent actions
+chrome.tabs.onCreated.addListener(async (tab) => {
+  // If no active session, don't track
+  if (!agentSessionActive && sessionTabGroupId === null) return;
+
+  console.log(`[TAB TRACKING] New tab created: ${tab.id}, openerTabId: ${tab.openerTabId}, windowId: ${tab.windowId}`);
+
+  // Track if opener is one of our managed tabs
+  if (tab.openerTabId) {
+    const isOpenerManaged = await isTabManagedByAgent(tab.openerTabId);
+    if (isOpenerManaged) {
+      agentOpenedTabs.add(tab.id);
+      console.log(`[TAB TRACKING] Tracking tab ${tab.id} (opened by agent tab ${tab.openerTabId})`);
+
+      // Try to add it to the agent's tab group (may fail for popup windows)
+      try {
+        if (sessionTabGroupId !== null) {
+          await chrome.tabs.group({ tabIds: [tab.id], groupId: sessionTabGroupId });
+        }
+      } catch (e) {
+        console.log(`[TAB TRACKING] Could not add tab ${tab.id} to group: ${e.message}`);
+      }
+      return;
+    }
+  }
+
+  // Also track tabs in new popup windows that appear during active session
+  // These might be payment popups, OAuth flows, etc.
+  try {
+    const window = await chrome.windows.get(tab.windowId);
+    if (window.type === 'popup' && agentSessionActive) {
+      agentOpenedTabs.add(tab.id);
+      console.log(`[TAB TRACKING] Tracking popup tab ${tab.id} (popup window during active session)`);
+    }
+  } catch (e) {
+    // Window might not exist
+  }
+});
+
+// Listen for new windows (catches popup windows)
+chrome.windows.onCreated.addListener(async (window) => {
+  if (!agentSessionActive) return;
+
+  console.log(`[WINDOW TRACKING] New window created: ${window.id}, type: ${window.type}`);
+
+  // If it's a popup window during an active session, track its tabs
+  if (window.type === 'popup') {
+    // Wait a moment for tabs to be created in the window
+    await new Promise(r => setTimeout(r, 100));
+
+    const tabs = await chrome.tabs.query({ windowId: window.id });
+    for (const tab of tabs) {
+      if (!agentOpenedTabs.has(tab.id)) {
+        agentOpenedTabs.add(tab.id);
+        console.log(`[WINDOW TRACKING] Tracking tab ${tab.id} from popup window ${window.id}`);
+      }
+    }
+  }
+});
+
+// Clean up tracking when tabs are closed
+chrome.tabs.onRemoved.addListener((tabId) => {
+  agentOpenedTabs.delete(tabId);
+});
+
+/**
+ * Check if a tab is managed by the agent (in group or opened by agent)
+ */
+async function isTabManagedByAgent(tabId) {
+  // Check if it's in our tab group
+  if (sessionTabGroupId !== null) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.groupId === sessionTabGroupId) return true;
+    } catch (e) {
+      // Tab doesn't exist
+    }
+  }
+
+  // Check if it was opened by an agent action
+  if (agentOpenedTabs.has(tabId)) return true;
+
+  return false;
+}
+
 /**
  * Get or create a tab group for this session
  */
@@ -311,7 +410,7 @@ async function ensureTabGroup(tabId) {
       const groupId = await chrome.tabs.group({ tabIds: [tabId] });
       await chrome.tabGroups.update(groupId, {
         title: 'Agent',
-        color: 'orange',
+        color: 'cyan',
         collapsed: false,
       });
       sessionTabGroupId = groupId;
@@ -360,7 +459,8 @@ async function addTabToGroup(tabId) {
 }
 
 /**
- * Validate that a tab is in our session's group
+ * Validate that a tab is accessible to the agent
+ * Allows tabs in our group OR tabs opened by agent actions
  */
 async function validateTabInGroup(tabId) {
   if (sessionTabGroupId === null) {
@@ -368,19 +468,16 @@ async function validateTabInGroup(tabId) {
     return { valid: true };
   }
 
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    if (tab.groupId === sessionTabGroupId) {
-      return { valid: true };
-    } else {
-      return {
-        valid: false,
-        error: `Tab ${tabId} is not in the Agent group. Use tabs_context to see available tabs, or tabs_create to make a new one.`
-      };
-    }
-  } catch (err) {
-    return { valid: false, error: `Tab ${tabId} not found: ${err.message}` };
+  // Use the unified check
+  const isManaged = await isTabManagedByAgent(tabId);
+  if (isManaged) {
+    return { valid: true };
   }
+
+  return {
+    valid: false,
+    error: `Tab ${tabId} is not managed by the Agent. Use tabs_context to see available tabs.`
+  };
 }
 
 // ============================================
@@ -391,8 +488,20 @@ function registerDebuggerListener() {
   if (debuggerListenerRegistered) return;
   debuggerListenerRegistered = true;
 
+  // Handle debugger detachment (tab closed, navigated, or user detached)
+  // This prevents crashes when tabs change unexpectedly
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    if (source.tabId === debuggerTabId) {
+      console.log(`[DEBUGGER] Detached from tab ${source.tabId}: ${reason}`);
+      debuggerAttached = false;
+      debuggerTabId = null;
+      networkTrackingEnabled = false;
+    }
+  });
+
   chrome.debugger.onEvent.addListener((source, method, params) => {
-    if (source.tabId !== debuggerTabId) return;
+    // Ignore events from tabs we're not attached to
+    if (source.tabId !== debuggerTabId || !debuggerAttached) return;
 
     if (method === 'Runtime.consoleAPICalled') {
       const msg = {
@@ -446,21 +555,40 @@ async function isDebuggerAttached(tabId) {
 async function ensureDebugger(tabId) {
   registerDebuggerListener();
 
+  // Verify tab exists before attempting to attach
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!tab || !tab.id) {
+      await log('DEBUGGER', 'Tab does not exist', { tabId });
+      return false;
+    }
+  } catch (e) {
+    await log('DEBUGGER', 'Tab not accessible', { tabId, error: e.message });
+    return false;
+  }
+
   const alreadyAttached = await isDebuggerAttached(tabId);
   if (alreadyAttached) {
     debuggerAttached = true;
     debuggerTabId = tabId;
     try {
       await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
-    } catch (e) {}
+    } catch (e) {
+      // Tab may have navigated, debugger may need reattachment
+    }
     return true;
   }
 
   try {
-    if (debuggerTabId && debuggerTabId !== tabId) {
+    // Detach from previous tab if attached to a different one
+    if (debuggerTabId && debuggerTabId !== tabId && debuggerAttached) {
       try {
         await chrome.debugger.detach({ tabId: debuggerTabId });
-      } catch (e) {}
+      } catch (e) {
+        // Already detached, that's fine
+      }
+      debuggerAttached = false;
+      debuggerTabId = null;
     }
 
     await chrome.debugger.attach({ tabId }, '1.3');
@@ -471,6 +599,8 @@ async function ensureDebugger(tabId) {
     await log('DEBUGGER', 'Attached to tab', { tabId });
     return true;
   } catch (err) {
+    debuggerAttached = false;
+    debuggerTabId = null;
     await log('ERROR', `Failed to attach debugger: ${err.message}`);
     return false;
   }
@@ -483,6 +613,34 @@ async function detachDebugger() {
   } catch (err) {}
   debuggerAttached = false;
   debuggerTabId = null;
+}
+
+/**
+ * Send a debugger command with auto-reattachment (like Claude in Chrome)
+ * If debugger is not attached, reattach and retry the command
+ */
+async function sendDebuggerCommand(tabId, method, params = {}) {
+  try {
+    return await chrome.debugger.sendCommand({ tabId }, method, params);
+  } catch (err) {
+    const errMsg = (err instanceof Error ? err.message : String(err)).toLowerCase();
+
+    // If debugger is not attached, reattach and retry (like Claude in Chrome)
+    if (errMsg.includes('not attached') || errMsg.includes('detached')) {
+      debuggerAttached = false;
+      debuggerTabId = null;
+
+      const attached = await ensureDebugger(tabId);
+      if (!attached) {
+        throw new Error('Failed to reattach debugger');
+      }
+
+      // Retry the command after reattachment
+      return await chrome.debugger.sendCommand({ tabId }, method, params);
+    }
+
+    throw err;
+  }
 }
 
 // ============================================
@@ -611,7 +769,7 @@ async function executeTool(toolName, toolInput) {
               viewportWidth: 1280, viewportHeight: 720, devicePixelRatio: 1
             };
 
-            const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+            const result = await sendDebuggerCommand(tabId, 'Page.captureScreenshot', {
               format: 'png',
               captureBeyondViewport: false,
               fromSurface: true,
@@ -655,7 +813,7 @@ async function executeTool(toolName, toolInput) {
           try {
             await ensureDebugger(tabId);
             // Use CDP clip parameter to actually crop the region
-            const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+            const result = await sendDebuggerCommand(tabId, 'Page.captureScreenshot', {
               format: 'png',
               captureBeyondViewport: false,
               fromSurface: true,
@@ -687,6 +845,7 @@ async function executeTool(toolName, toolInput) {
         case 'double_click':
         case 'triple_click': {
           let x, y;
+          let rectInfo = null;
           if (toolInput.ref) {
             const result = await sendToContent(tabId, 'GET_ELEMENT_RECT', { ref: toolInput.ref });
             if (!result.success || !result.rect) {
@@ -694,11 +853,15 @@ async function executeTool(toolName, toolInput) {
             }
             x = result.rect.centerX;
             y = result.rect.centerY;
+            rectInfo = result.rect;
           } else if (toolInput.coordinate) {
             [x, y] = toolInput.coordinate;
           } else {
             return 'Error: No ref or coordinate provided for click';
           }
+
+          // Debug logging for click coordinates (helps diagnose scaling issues)
+          await log('CLICK', `${toolInput.ref || 'coordinate'} → (${Math.round(x)}, ${Math.round(y)})`, rectInfo);
 
           await ensureDebugger(tabId);
           const clickCount = action === 'double_click' ? 2 : action === 'triple_click' ? 3 : 1;
@@ -714,19 +877,22 @@ async function executeTool(toolName, toolInput) {
             }
           }
 
+          // Record tabs before click to detect new ones
+          const tabsBeforeClick = new Set(agentOpenedTabs);
+
           // Move mouse first
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mouseMoved', x, y, button: 'none', buttons: 0, modifiers,
           });
           await new Promise(r => setTimeout(r, 50));
 
           // Click
           for (let i = 1; i <= clickCount; i++) {
-            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+            await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
               type: 'mousePressed', x, y, button, buttons: buttonCode, clickCount: i, modifiers,
             });
             await new Promise(r => setTimeout(r, 12));
-            await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+            await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
               type: 'mouseReleased', x, y, button, buttons: 0, clickCount: i, modifiers,
             });
             if (i < clickCount) await new Promise(r => setTimeout(r, 80));
@@ -737,10 +903,23 @@ async function executeTool(toolName, toolInput) {
             gifRecording.actions.push({ type: 'click', x, y, clickCount });
           }
 
+          // Wait a moment for potential new tab/window to open
+          await new Promise(r => setTimeout(r, 300));
+
+          // Check if new tabs were opened by this click (via our onCreated listener)
+          const newTabIds = [...agentOpenedTabs].filter(id => !tabsBeforeClick.has(id));
+
           const clickType = clickCount === 1 ? 'Clicked' : clickCount === 2 ? 'Double-clicked' : 'Triple-clicked';
-          return toolInput.ref
+          let result = toolInput.ref
             ? `${clickType} on element ${toolInput.ref}`
             : `${clickType} at (${Math.round(x)}, ${Math.round(y)})`;
+
+          // Inform agent about new tabs opened by this click
+          if (newTabIds.length > 0) {
+            result += `\n\nNote: This click opened new tab(s) with ID(s): ${newTabIds.join(', ')}. Use tabs_context to see all available tabs, then switch to the new tab if needed.`;
+          }
+
+          return result;
         }
 
         case 'hover': {
@@ -759,7 +938,7 @@ async function executeTool(toolName, toolInput) {
           }
 
           await ensureDebugger(tabId);
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mouseMoved', x, y, button: 'none', buttons: 0,
           });
           return `Hovered at (${Math.round(x)}, ${Math.round(y)})`;
@@ -772,25 +951,25 @@ async function executeTool(toolName, toolInput) {
           await ensureDebugger(tabId);
 
           // Move to start
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mouseMoved', x: startX, y: startY, button: 'none', buttons: 0,
           });
           await new Promise(r => setTimeout(r, 50));
 
           // Press
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mousePressed', x: startX, y: startY, button: 'left', buttons: 1, clickCount: 1,
           });
           await new Promise(r => setTimeout(r, 50));
 
           // Drag
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mouseMoved', x: endX, y: endY, button: 'left', buttons: 1,
           });
           await new Promise(r => setTimeout(r, 50));
 
           // Release
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
+          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
             type: 'mouseReleased', x: endX, y: endY, button: 'left', buttons: 0, clickCount: 1,
           });
 
@@ -803,7 +982,7 @@ async function executeTool(toolName, toolInput) {
 
         case 'type': {
           await ensureDebugger(tabId);
-          await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: toolInput.text });
+          await sendDebuggerCommand(tabId, 'Input.insertText', { text: toolInput.text });
           return `Typed: "${toolInput.text}"`;
         }
 
@@ -822,7 +1001,7 @@ async function executeTool(toolName, toolInput) {
                   const shiftMod = requiresShift(key) ? 8 : 0;
                   await pressKey(tabId, keyDef, shiftMod);
                 } else {
-                  await chrome.debugger.sendCommand({ tabId }, 'Input.insertText', { text: key });
+                  await sendDebuggerCommand(tabId, 'Input.insertText', { text: key });
                 }
               }
             }
@@ -847,21 +1026,13 @@ async function executeTool(toolName, toolInput) {
 
           const [x, y] = toolInput.coordinate || [400, 300];
 
-          // Find scrollable container at coordinates and scroll it
+          // Find scrollable container at coordinates and scroll it (like Claude in Chrome)
+          // Uses behavior: "instant" for immediate scroll, falls back to window.scrollBy
           const scrollResult = await sendToContent(tabId, 'FIND_AND_SCROLL', {
             x, y, deltaX, deltaY, direction, amount
           });
 
-          if (scrollResult.scrolledContainer) {
-            return `Scrolled ${direction} by ${amount}px in ${scrollResult.containerType}`;
-          }
-
-          // Fallback to mouse wheel event if no scrollable container found
-          await ensureDebugger(tabId);
-          await chrome.debugger.sendCommand({ tabId }, 'Input.dispatchMouseEvent', {
-            type: 'mouseWheel', x, y, deltaX, deltaY,
-          });
-          return `Scrolled ${direction} by ${amount}px`;
+          return `Scrolled ${direction} by ${amount}px in ${scrollResult.containerType || 'page'}`;
         }
 
         case 'scroll_to': {
@@ -885,14 +1056,15 @@ async function executeTool(toolName, toolInput) {
     // ----------------------------------------
     case 'read_page': {
       const result = await sendToContent(tabId, 'READ_PAGE', {
-        filter: toolInput.filter || 'all',
+        filter: toolInput.filter || 'interactive',  // Default to 'interactive' like Claude in Chrome
         depth: toolInput.depth || 15,
         ref_id: toolInput.ref_id,
         maxChars: toolInput.max_chars || 50000,
       });
       if (result.success) {
-        const viewport = result.viewport ? `\nViewport: ${result.viewport.width}x${result.viewport.height}` : '';
-        return `Page: ${result.title}\nURL: ${result.url}${viewport}\n\nAccessibility Tree:\n${result.tree}`;
+        // Match Claude in Chrome format exactly: elements first, then \n\nViewport at end
+        const viewport = result.viewport ? `\n\nViewport: ${result.viewport.width}x${result.viewport.height}` : '';
+        return `${result.tree}${viewport}`;
       }
       return `Error: ${result.error}`;
     }
@@ -902,7 +1074,7 @@ async function executeTool(toolName, toolInput) {
     // ----------------------------------------
     case 'find': {
       const query = toolInput.query;
-      const result = await sendToContent(tabId, 'READ_PAGE', { filter: 'all', depth: 20 });
+      const result = await sendToContent(tabId, 'READ_PAGE', { filter: 'interactive', depth: 20 });
 
       if (!result.success) {
         return `Error: ${result.error}`;
@@ -1046,7 +1218,7 @@ ERROR: explanation`;
 
         // Use Chrome DevTools Protocol Runtime.evaluate (bypasses CSP!)
         // This runs in the debugger context, not the page context
-        const result = await chrome.debugger.sendCommand({ tabId }, 'Runtime.evaluate', {
+        const result = await sendDebuggerCommand(tabId, 'Runtime.evaluate', {
           expression,
           returnByValue: true,
           awaitPromise: true,
@@ -1117,16 +1289,16 @@ ERROR: explanation`;
             return `Error: Could not find element with ref ${toolInput.ref}`;
           }
           // Get the DOM node using the selector
-          const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument');
-          const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+          const doc = await sendDebuggerCommand(tabId, 'DOM.getDocument');
+          const node = await sendDebuggerCommand(tabId, 'DOM.querySelector', {
             nodeId: doc.root.nodeId,
             selector: result.selector,
           });
           nodeId = node.nodeId;
         } else if (toolInput.selector) {
           // Use CSS selector directly
-          const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument');
-          const node = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
+          const doc = await sendDebuggerCommand(tabId, 'DOM.getDocument');
+          const node = await sendDebuggerCommand(tabId, 'DOM.querySelector', {
             nodeId: doc.root.nodeId,
             selector: toolInput.selector,
           });
@@ -1139,20 +1311,20 @@ ERROR: explanation`;
         }
 
         // Verify it's a file input
-        const nodeInfo = await chrome.debugger.sendCommand({ tabId }, 'DOM.describeNode', { nodeId });
+        const nodeInfo = await sendDebuggerCommand(tabId, 'DOM.describeNode', { nodeId });
         if (nodeInfo.node.nodeName !== 'INPUT') {
           return `Error: Element is not an input element (found: ${nodeInfo.node.nodeName})`;
         }
 
         // Determine file source and prepare the file
         let filePath;
-        const fileName = toolInput.fileName || 'uploaded_file';
 
         if (toolInput.filePath) {
           // Use local file path directly
           filePath = toolInput.filePath;
         } else if (toolInput.fileUrl) {
-          // Download file from URL
+          // Download file from URL using chrome.downloads API
+          const fileName = toolInput.fileName || toolInput.fileUrl.split('/').pop() || 'downloaded_file';
           const downloadId = await new Promise((resolve, reject) => {
             chrome.downloads.download({
               url: toolInput.fileUrl,
@@ -1194,63 +1366,19 @@ ERROR: explanation`;
               reject(new Error('Download timeout'));
             }, 60000);
           });
-        } else if (toolInput.base64Data) {
-          // Create file from base64 data
-          const mimeType = toolInput.mimeType || 'application/octet-stream';
-          const dataUrl = `data:${mimeType};base64,${toolInput.base64Data}`;
-
-          const downloadId = await new Promise((resolve, reject) => {
-            chrome.downloads.download({
-              url: dataUrl,
-              filename: `browser-agent-uploads/${fileName}`,
-              conflictAction: 'uniquify',
-            }, (id) => {
-              if (chrome.runtime.lastError) {
-                reject(new Error(chrome.runtime.lastError.message));
-              } else {
-                resolve(id);
-              }
-            });
-          });
-
-          // Wait for download to complete
-          filePath = await new Promise((resolve, reject) => {
-            const listener = (delta) => {
-              if (delta.id === downloadId) {
-                if (delta.state?.current === 'complete') {
-                  chrome.downloads.onChanged.removeListener(listener);
-                  chrome.downloads.search({ id: downloadId }, (results) => {
-                    if (results && results[0]) {
-                      resolve(results[0].filename);
-                    } else {
-                      reject(new Error('Could not find downloaded file'));
-                    }
-                  });
-                } else if (delta.state?.current === 'interrupted') {
-                  chrome.downloads.onChanged.removeListener(listener);
-                  reject(new Error('Download interrupted'));
-                }
-              }
-            };
-            chrome.downloads.onChanged.addListener(listener);
-
-            // Timeout after 30 seconds
-            setTimeout(() => {
-              chrome.downloads.onChanged.removeListener(listener);
-              reject(new Error('File creation timeout'));
-            }, 30000);
-          });
         } else {
-          return 'Error: Must provide filePath, fileUrl, or base64Data';
+          return 'Error: Must provide filePath or fileUrl';
         }
 
         // Use CDP to set the file on the input element
-        await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
+        await sendDebuggerCommand(tabId, 'DOM.setFileInputFiles', {
           files: [filePath],
           nodeId: nodeId,
         });
 
-        return `Successfully uploaded file "${fileName}" to the file input element`;
+        // Extract filename from path for the success message
+        const uploadedFileName = filePath.split('/').pop() || filePath;
+        return `Successfully uploaded file "${uploadedFileName}" to the file input element`;
       } catch (err) {
         return `Error uploading file: ${err.message}`;
       }
@@ -1260,25 +1388,74 @@ ERROR: explanation`;
     // TABS_CONTEXT TOOL
     // ----------------------------------------
     case 'tabs_context': {
-      let tabs;
+      let tabs = [];
+      const existingTabIds = new Set();
+
+      // 1. Get tabs in our group across ALL windows
       if (sessionTabGroupId !== null) {
-        // Only return tabs in our group
-        tabs = await chrome.tabs.query({ currentWindow: true, groupId: sessionTabGroupId });
-      } else {
-        // No group yet - return active tab
+        const groupTabs = await chrome.tabs.query({ groupId: sessionTabGroupId });
+        for (const tab of groupTabs) {
+          tabs.push(tab);
+          existingTabIds.add(tab.id);
+        }
+      }
+
+      // 2. Add tabs opened by agent actions (popups, new windows from clicks)
+      for (const tabId of agentOpenedTabs) {
+        if (!existingTabIds.has(tabId)) {
+          try {
+            const tab = await chrome.tabs.get(tabId);
+            if (tab && !tab.url?.startsWith('chrome://')) {
+              tabs.push(tab);
+              existingTabIds.add(tab.id);
+            }
+          } catch (e) {
+            // Tab was closed, remove from tracking
+            agentOpenedTabs.delete(tabId);
+          }
+        }
+      }
+
+      // 3. FALLBACK: Scan all popup windows for tabs during active session
+      // This catches popups that weren't detected by listeners
+      if (agentSessionActive) {
+        try {
+          const allWindows = await chrome.windows.getAll({ windowTypes: ['popup'] });
+          for (const window of allWindows) {
+            const windowTabs = await chrome.tabs.query({ windowId: window.id });
+            for (const tab of windowTabs) {
+              if (!existingTabIds.has(tab.id) && !tab.url?.startsWith('chrome://') && !tab.url?.startsWith('chrome-extension://')) {
+                tabs.push(tab);
+                existingTabIds.add(tab.id);
+                // Also add to tracking for future reference
+                agentOpenedTabs.add(tab.id);
+                console.log(`[TABS_CONTEXT] Found untracked popup tab: ${tab.id} - ${tab.url}`);
+              }
+            }
+          }
+        } catch (e) {
+          console.log(`[TABS_CONTEXT] Error scanning popup windows: ${e.message}`);
+        }
+      }
+
+      // 4. If still no tabs, return active tab
+      if (tabs.length === 0) {
         tabs = await chrome.tabs.query({ active: true, currentWindow: true });
       }
+
       const tabInfo = tabs.map(t => ({
         tabId: t.id,
         url: t.url,
         title: t.title,
         active: t.active,
         groupId: t.groupId,
+        openedByAgent: agentOpenedTabs.has(t.id),
       }));
+
       return JSON.stringify({
         availableTabs: tabInfo,
         groupId: sessionTabGroupId,
-        note: sessionTabGroupId ? 'Showing tabs in Agent group only' : 'No group created yet'
+        note: 'Showing tabs in Agent group, agent-opened tabs, and popup windows'
       }, null, 2);
     }
 
@@ -1392,7 +1569,7 @@ ERROR: explanation`;
       await ensureDebugger(tabId);
       if (!networkTrackingEnabled) {
         try {
-          await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+          await sendDebuggerCommand(tabId, 'Network.enable', { maxPostDataSize: 65536 });
           networkTrackingEnabled = true;
         } catch (err) {
           return `Error enabling network tracking: ${err.message}`;
@@ -1534,7 +1711,9 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
   // Continue from existing history or start fresh
   const messages = [...existingHistory, { role: 'user', content: userContent }];
   let steps = 0;
-  const maxSteps = getConfig().maxSteps || 50;
+  // maxSteps: 0 means unlimited, otherwise use configured value or default to 100
+  const configMaxSteps = getConfig().maxSteps;
+  const maxSteps = configMaxSteps === 0 ? Infinity : (configMaxSteps || 100);
 
   while (steps < maxSteps) {
     // Check if task was cancelled
@@ -1633,10 +1812,13 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
 async function startTask(tabId, task, shouldAskBeforeActing = true, image = null) {
   // Reset state for new task (but preserve conversation history)
   sessionTabGroupId = null;
+  agentOpenedTabs.clear();  // Clear tracked tabs from previous session
+  agentSessionActive = true;  // Mark session as active for popup tracking
   sessionId = generateSessionId();
   askBeforeActing = shouldAskBeforeActing;
   taskCancelled = false;
   taskScreenshots = [];
+  taskDebugLog = []; // Clear debug log for new task
 
   // Create new abort controller for this task
   createAbortController();
@@ -1658,6 +1840,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, image = null
     }
 
     await detachDebugger();
+    agentSessionActive = false;  // Mark session as inactive
     currentTask.status = result.success ? 'completed' : 'failed';
     currentTask.result = result;
     currentTask.endTime = new Date().toISOString();
@@ -1680,6 +1863,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, image = null
     return result;
   } catch (error) {
     await detachDebugger();
+    agentSessionActive = false;  // Mark session as inactive
     // Hide visual indicators
     await hideAgentIndicators(tabId);
 
@@ -1795,4 +1979,4 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Set side panel behavior
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-console.log('[Browser Agent] Service worker loaded');
+console.log('[LLM in Chrome] Service worker loaded');

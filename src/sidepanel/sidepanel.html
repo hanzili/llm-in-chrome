@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Browser Agent</title>
+  <title>LLM in Chrome</title>
   <style>
     * {
       box-sizing: border-box;
@@ -11,6 +11,7 @@
       padding: 0;
     }
 
+    /* Dark mode (default) */
     :root {
       --bg-primary: #1a1a1a;
       --bg-secondary: #242424;
@@ -18,10 +19,40 @@
       --text-primary: #e8e8e8;
       --text-secondary: #888;
       --text-muted: #666;
-      --accent: #d4845f;
-      --accent-hover: #e4946f;
+      --accent: #5D9A9A;
+      --accent-hover: #6DAAAA;
       --user-bubble: #3a3a3a;
       --border: #333;
+    }
+
+    /* Light mode */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-primary: #ffffff;
+        --bg-secondary: #f5f5f5;
+        --bg-tertiary: #e8e8e8;
+        --text-primary: #1a1a1a;
+        --text-secondary: #666;
+        --text-muted: #888;
+        --accent: #4D8A8A;
+        --accent-hover: #3D7A7A;
+        --user-bubble: #e8e8e8;
+        --border: #ddd;
+        --shadow: rgba(0, 0, 0, 0.1);
+        --overlay: rgba(0, 0, 0, 0.3);
+      }
+
+      .model-dropdown {
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+      }
+
+      .modal-overlay {
+        background: rgba(0, 0, 0, 0.4);
+      }
+
+      .send-btn svg {
+        stroke: white;
+      }
     }
 
     html, body {
@@ -610,7 +641,7 @@
     }
 
     .btn-secondary:hover {
-      background: #444;
+      background: var(--bg-primary);
     }
 
     /* Tabs in modal */
@@ -706,7 +737,7 @@
     }
 
     .toggle-btn:hover {
-      background: rgba(255,255,255,0.05);
+      background: var(--bg-tertiary);
     }
 
     .toggle-btn.active {
@@ -751,7 +782,7 @@
     .stop-btn {
       width: 36px;
       height: 36px;
-      background: #e74c3c;
+      background: var(--accent);
       border: none;
       border-radius: 50%;
       cursor: pointer;
@@ -761,7 +792,7 @@
     }
 
     .stop-btn:hover {
-      background: #c0392b;
+      background: var(--accent-hover);
     }
 
     .stop-btn.hidden {
@@ -923,8 +954,8 @@
       </button>
       <button class="header-btn" id="settings-btn" title="Settings">
         <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="12" cy="12" r="3"/>
-          <path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+          <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1.08-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1.08 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
         </svg>
       </button>
     </div>
@@ -963,7 +994,7 @@
               <span class="provider-name">OpenAI</span>
               <span class="provider-status" id="openai-status">Not configured</span>
             </div>
-            <div class="provider-models">GPT-4o, GPT-4 Turbo, o1, o3-mini</div>
+            <div class="provider-models">GPT-5, GPT-5 Mini, GPT-4.1, GPT-4o, o3, o4-mini</div>
           </div>
 
           <div class="provider-card" data-provider="google">
@@ -971,7 +1002,7 @@
               <span class="provider-name">Google</span>
               <span class="provider-status" id="google-status">Not configured</span>
             </div>
-            <div class="provider-models">Gemini 2.0 Flash, Gemini 1.5 Pro</div>
+            <div class="provider-models">Gemini 3 Pro, Gemini 2.5 Flash, Gemini 2.5 Pro</div>
           </div>
 
           <div class="provider-card" data-provider="openrouter">
