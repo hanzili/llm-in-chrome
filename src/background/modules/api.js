@@ -11,7 +11,7 @@ import { DOMAIN_SKILLS } from './domain-skills.js';
 let config = {
   apiBaseUrl: 'http://127.0.0.1:8000/claude/v1/messages',
   apiKey: null,
-  model: 'claude-opus-4-5-20251101',
+  model: 'claude-sonnet-4-20250514',
   maxTokens: 10000,
   maxSteps: 0,
 };
