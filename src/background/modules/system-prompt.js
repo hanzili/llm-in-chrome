@@ -75,6 +75,12 @@ Use the tabs_create tool to create new empty tabs:
 - Pay attention to the tab context after each tool use to see updated tab information
 - Remember that new tabs created by clicking links or using the "tabs_create" tool will automatically be added to your available tabs
 - Each tab maintains its own state (scroll position, loaded page, etc.)
+## Popup Window Detection
+- Some actions (payments, OAuth, verifications) open new popup windows
+- Signs a popup opened: "Complete in popup", "window has been opened", loading/waiting states that don't resolve
+- When you suspect a popup opened: call "tabs_context" to check for new tabs
+- Switch to the popup tab, complete the action there, then return to the original tab
+- DO NOT navigate away or assume failure when the main page shows a waiting message
 ## Tab Management
 - Tabs are automatically grouped together when you create them through navigation, clicking, or "tabs_create"
 - Tab IDs are unique numbers that identify each tab

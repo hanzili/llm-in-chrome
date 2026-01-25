@@ -265,6 +265,21 @@ export const TOOL_DEFINITIONS = [
   },
 
   {
+    name: 'tabs_close',
+    description: 'Close a tab or popup window. Use this to close popup windows after completing actions in them, or to clean up tabs that are no longer needed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tabId: {
+          type: 'number',
+          description: 'Tab ID to close. Use tabs_context first to get available tabs.',
+        },
+      },
+      required: ['tabId'],
+    },
+  },
+
+  {
     name: 'upload_image',
     description: `Upload a previously captured screenshot or user-uploaded image to a file input or drag & drop target. Supports two approaches: (1) ref - for targeting specific elements, especially hidden file inputs, (2) coordinate - for drag & drop to visible locations like Google Docs. Provide either ref or coordinate, not both.`,
     input_schema: {
@@ -348,6 +363,21 @@ export const TOOL_DEFINITIONS = [
         limit: {
           type: 'number',
           description: 'Maximum number of requests to return. Defaults to 100. Increase only if you need more results.',
+        },
+      },
+      required: ['tabId'],
+    },
+  },
+
+  {
+    name: 'solve_captcha',
+    description: `Solve a CAPTCHA on deckathon-concordia.com. This tool automatically uses the captured challenge data and brute-forces the solution. Returns the indices of images to click (0-indexed). After getting the indices, click those images and then click Verify.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        tabId: {
+          type: 'number',
+          description: 'Tab ID where the CAPTCHA is displayed.',
         },
       },
       required: ['tabId'],

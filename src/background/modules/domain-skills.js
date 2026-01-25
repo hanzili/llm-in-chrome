@@ -130,6 +130,159 @@ export const DOMAIN_SKILLS = [
 - Product details and reviews are on the product page
 - Check seller information and shipping times before purchasing`
   },
+  {
+    domain: 'deckathon-concordia.com',
+    skill: `Deckathon Hackathon Site:
+
+## Dropout Process
+- Dropping out requires completing prerequisite tasks first (e.g., dropping classes, paying balances)
+- If you see "Not Yet Eligible" or similar warnings, you MUST complete the required steps first
+- Check if buttons are disabled before clicking - don't assume buttons will work
+- Look for checklists or status indicators showing what needs to be done
+- Complete all required tasks before attempting the final dropout action
+
+## Anti-Bot Challenges on This Site:
+
+This site has multiple anti-bot mechanisms. Here's how to handle each:
+
+### 1. Mouse Tracking (Login/Registration)
+- Login and registration pages track mouse movements (count and total distance)
+- This is handled automatically - our clicks include simulated mouse movement
+- No special action needed
+
+### 1b. Dropout Page Activity Verification
+The dropout form has strict activity thresholds you MUST meet before submitting:
+
+**"Demonstrate activity" requires:**
+- 75+ mouse movements (each 5-500px distance)
+- 20+ direction changes (sharp turns >45°)
+
+**"Navigate erratically" requires:**
+- 15+ total keystrokes
+- 8+ unique keys pressed
+
+**How to pass:**
+1. Use javascript_tool to simulate activity:
+\`\`\`javascript
+// Simulate mouse movements with direction changes
+for (let i = 0; i < 100; i++) {
+  const angle = (i % 4) * 90; // Change direction every move
+  const x = 400 + Math.cos(angle * Math.PI/180) * 50;
+  const y = 300 + Math.sin(angle * Math.PI/180) * 50;
+  window.dispatchEvent(new MouseEvent('mousemove', {clientX: x, clientY: y, bubbles: true}));
+}
+// Simulate keystrokes with unique keys
+'abcdefghijklmnop'.split('').forEach(key => {
+  window.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true}));
+});
+\`\`\`
+2. After thresholds are met, a 10-second countdown starts
+3. Continue showing activity during the countdown
+4. Once countdown completes, the form becomes submittable
+
+### 1c. Dropout Popup Challenges
+After activity verification, 8 random popup modals appear. You must solve ALL of them.
+
+**Quick bypass**: \`localStorage.setItem("skip_popups", "true")\` skips all popups.
+
+**Manual solutions for each popup type:**
+
+| Challenge | Solution |
+|-----------|----------|
+| **ssn-input** | Type "nice try" (or any 9 digits) |
+| **robot-check** | Click the "Verify" button (don't answer the philosophical question) |
+| **wait-timer** | Click Start, wait for progress bar to reach 100%, then Submit |
+| **button-mash** | Press 5+ different keys while focused on the popup |
+| **dodgy-close** | Click the moving X button 3 times, then click it again to close |
+| **newsletter** | Type "unsubscribe" in the input field |
+| **terms-conditions** | Scroll to bottom of text, check the accept box, then Submit |
+| **email-verify** | Type "VERIFY" (uppercase) in the input |
+| **browser-update** | Check the acknowledge checkbox, then click Update |
+| **country-select** | Select a country, then state, then city from dropdowns |
+| **iframe-survey** | Check the checkbox inside the iframe |
+| **overlapping-buttons** | One button is correct (random) - try each until one works |
+
+### 2. Bouncing Slider Modal ("Confirm Payment" / "결제 확인")
+- A modal appears that BOUNCES around the screen
+- Normal clicks won't work because the modal moves before the click lands
+- **Solution**: Use javascript_tool to dispatch mouse events directly:
+
+\`\`\`javascript
+javascript_tool with action='javascript_exec' and text:
+
+const handle = document.querySelector('.slider-handle');
+if (handle) {
+  const rect = handle.getBoundingClientRect();
+  const startX = rect.left + rect.width / 2;
+  const startY = rect.top + rect.height / 2;
+
+  // Mousedown stops the bouncing
+  handle.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true, clientX: startX, clientY: startY}));
+
+  // Drag to the right
+  setTimeout(() => {
+    document.dispatchEvent(new MouseEvent('mousemove', {bubbles: true, cancelable: true, clientX: startX + 300, clientY: startY}));
+    setTimeout(() => {
+      document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true, clientX: startX + 300, clientY: startY}));
+    }, 100);
+  }, 50);
+
+  'Slider solved - mousedown stops bouncing, then drag completes it';
+}
+\`\`\`
+
+### 3. Number Sequence CAPTCHA ("Click numbers in order: X → Y → Z")
+- Read the sequence from the page (e.g., "8 → 3 → 7")
+- Click the buttons in that exact order
+- Buttons are labeled 1-9, just click them in the specified sequence
+
+### 4. Image CAPTCHAs
+
+**"pretty_faces"** (at /dropout) - CANNOT be solved visually
+- Use the solve_captcha tool (handles everything automatically)
+- Just call: solve_captcha(tabId)
+
+**"select the sun"** - WORDPLAY TRICK
+- "Sun" is a PERSON'S NAME, not the sun in the sky!
+- You must select the image showing a HUMAN FACE (a person named "Sun")
+- **CRITICAL**: Take a screenshot and CAREFULLY examine each of the 9 images
+- Look for a photo of a person/face - ignore all yellow sun/star drawings
+- The human face may be in ANY position in the 3x3 grid, not necessarily the first image
+- Describe what you see in each image before selecting to avoid mistakes
+
+**"select logos"** - Solve visually
+- Select images containing logo designs (Deck logo, Concordia logo)
+
+### 5. Form Token Expiration
+- Form tokens expire quickly
+- Complete forms promptly after they load
+- If you get "Invalid or expired form token", refresh and try again faster
+
+### 5b. Session Expiration
+- Sessions can expire unexpectedly - you may find yourself back at the login page
+- If this happens, log in again with: netname: hanzili5, password: 123456
+
+### 6. Popup Windows (Payment, Verification, etc.)
+- Some actions open a NEW POPUP WINDOW instead of showing content inline
+- Signs a popup opened: "Complete Payment in Popup Window", "A secure payment window has been opened", loading spinner that doesn't resolve
+- **CRITICAL**: When you see these signs, you MUST:
+  1. Use \`tabs_context\` tool to list all open tabs
+  2. Find the new popup tab (usually the most recent tab, or one with payment/verification URL)
+  3. Switch to that tab by using its tabId in subsequent tool calls
+  4. Complete the action in the popup
+  5. Use \`tabs_close\` tool to close the popup when done, or if session expires
+- **DO NOT** navigate away from the current page or go to a different URL when waiting for a popup
+- **DO NOT** assume a popup closed just because a button click said "Close Window" - use \`tabs_close\` to actually close it
+- **DO NOT** assume the popup failed just because the main page shows a waiting message
+
+## General Debugging Approach
+
+If you encounter a new anti-bot challenge:
+1. Use javascript_tool to fetch and inspect the site's JS:
+   \`fetch('URL').then(r => r.text()).then(code => { /* analyze */ })\`
+2. Look for event listeners, timers, or tracking mechanisms
+3. Craft a solution using javascript_tool to dispatch events or modify state directly`
+  },
 ];
 
 /**

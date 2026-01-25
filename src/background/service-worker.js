@@ -10,8 +10,14 @@
 
 import { TOOL_DEFINITIONS } from '../tools/definitions.js';
 import { getDomainSkills } from './modules/domain-skills.js';
+import { solveCaptcha } from './modules/captcha-solvers.js';
 import { getKeyCode, requiresShift, pressKey, pressKeyChord } from './modules/keys.js';
 import { buildSystemPrompt } from './modules/system-prompt.js';
+import {
+  simulateMouseMovement,
+  simulateIdleMovement,
+  clearPosition as clearMousePosition,
+} from './modules/mouse-movement.js';
 import {
   loadConfig, getConfig, setConfig, getApiHeaders,
   createAbortController, getAbortController, abortRequest,
@@ -263,6 +269,9 @@ let conversationHistory = []; // Persists across tasks in the same chat session
 let networkTrackingEnabled = false;
 let debuggerListenerRegistered = false;
 
+// CAPTCHA response capture - stores intercepted challenge data by tab
+let capturedCaptchaData = new Map();
+
 // Screenshot storage for upload_image
 let capturedScreenshots = new Map();
 let screenshotCounter = 0;
@@ -301,8 +310,47 @@ const agentOpenedTabs = new Set();
 // Track if we're currently in an active agent session
 let agentSessionActive = false;
 
+/**
+ * ============================================================================
+ * POPUP/WINDOW TRACKING
+ * ============================================================================
+ *
+ * The listeners below (chrome.tabs.onCreated, chrome.windows.onCreated) were
+ * designed to automatically track popup windows and new tabs opened by agent
+ * actions (e.g., payment flows, OAuth redirects, external links).
+ *
+ * STATUS: DISABLED (but tracking still works via tabs_context tool)
+ *
+ * KNOWN ISSUE - CHROME FULLSCREEN BUG:
+ * Chrome crashes when a new tab is created in the same window while in
+ * fullscreen mode. This is a Chrome-level bug, not caused by our extension.
+ * Disabling these listeners doesn't fix the crash, but we keep them disabled
+ * to reduce any potential interference.
+ *
+ * WHAT WORKS:
+ * - Non-fullscreen mode: New tabs and popups are tracked correctly
+ * - Fullscreen + new popup window: Works fine
+ * - Fullscreen + new tab (same window): Chrome crashes (Chrome bug)
+ *
+ * WORKAROUND FOR DEMOS:
+ * Run the agent in non-fullscreen mode if the workflow involves opening
+ * new tabs in the same window (e.g., payment checkouts).
+ *
+ * NOTE: Even with these listeners disabled, the tabs_context tool still
+ * correctly detects new tabs via chrome.tabs.query. The agent successfully
+ * handles payment flows and multi-tab interactions in non-fullscreen mode.
+ *
+ * TO RE-ENABLE (if needed):
+ * 1. Remove the early `return;` statements in both listeners
+ * 2. Test thoroughly in fullscreen mode
+ * ============================================================================
+ */
+
 // Listen for new tabs and track ones that might be opened by agent actions
 chrome.tabs.onCreated.addListener(async (tab) => {
+  // DISABLED: This was causing browser crashes in fullscreen mode
+  return;
+
   // If no active session, don't track
   if (!agentSessionActive && sessionTabGroupId === null) return;
 
@@ -314,15 +362,6 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     if (isOpenerManaged) {
       agentOpenedTabs.add(tab.id);
       console.log(`[TAB TRACKING] Tracking tab ${tab.id} (opened by agent tab ${tab.openerTabId})`);
-
-      // Try to add it to the agent's tab group (may fail for popup windows)
-      try {
-        if (sessionTabGroupId !== null) {
-          await chrome.tabs.group({ tabIds: [tab.id], groupId: sessionTabGroupId });
-        }
-      } catch (e) {
-        console.log(`[TAB TRACKING] Could not add tab ${tab.id} to group: ${e.message}`);
-      }
       return;
     }
   }
@@ -341,7 +380,11 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 // Listen for new windows (catches popup windows)
+// NOTE: Disabled to fix browser crashes in fullscreen mode
 chrome.windows.onCreated.addListener(async (window) => {
+  // DISABLED: This was causing browser crashes in fullscreen mode
+  return;
+
   if (!agentSessionActive) return;
 
   console.log(`[WINDOW TRACKING] New window created: ${window.id}, type: ${window.type}`);
@@ -364,6 +407,7 @@ chrome.windows.onCreated.addListener(async (window) => {
 // Clean up tracking when tabs are closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   agentOpenedTabs.delete(tabId);
+  clearMousePosition(tabId);
 });
 
 /**
@@ -530,7 +574,38 @@ function registerDebuggerListener() {
 
     if (method === 'Network.responseReceived') {
       const req = networkRequests.find(r => r.requestId === params.requestId);
-      if (req) req.status = params.response.status;
+      if (req) {
+        req.status = params.response.status;
+        req.responseUrl = params.response.url;
+      }
+    }
+
+    // Capture response body when loading finishes (body is now available)
+    if (method === 'Network.loadingFinished') {
+      const req = networkRequests.find(r => r.requestId === params.requestId);
+      if (req && req.responseUrl && req.responseUrl.includes('/captcha/challenge')) {
+        (async () => {
+          try {
+            const result = await chrome.debugger.sendCommand(
+              { tabId: source.tabId },
+              'Network.getResponseBody',
+              { requestId: params.requestId }
+            );
+            if (result && result.body) {
+              const data = JSON.parse(result.body);
+              capturedCaptchaData.set(source.tabId, {
+                imageUrls: data.images.map(img => img.url),
+                encryptedAnswer: data.encrypted_answer,
+                timestamp: Date.now(),
+                challengeType: new URL(req.responseUrl).searchParams.get('challenge_type')
+              });
+              console.log('[CAPTCHA] Captured challenge for tab', source.tabId);
+            }
+          } catch (e) {
+            console.log('[CAPTCHA] Failed to capture response:', e.message);
+          }
+        })();
+      }
     }
 
     if (method === 'Network.loadingFailed') {
@@ -573,6 +648,11 @@ async function ensureDebugger(tabId) {
     debuggerTabId = tabId;
     try {
       await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+      // Enable Network to capture CAPTCHA responses
+      if (!networkTrackingEnabled) {
+        await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+        networkTrackingEnabled = true;
+      }
     } catch (e) {
       // Tab may have navigated, debugger may need reattachment
     }
@@ -593,6 +673,9 @@ async function ensureDebugger(tabId) {
 
     await chrome.debugger.attach({ tabId }, '1.3');
     await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
+    // Enable Network to capture CAPTCHA responses
+    await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
+    networkTrackingEnabled = true;
 
     debuggerAttached = true;
     debuggerTabId = tabId;
@@ -732,7 +815,7 @@ async function executeTool(toolName, toolInput) {
 
   // Validate tab is in our group (for tools that use tabId)
   const tabTools = ['computer', 'read_page', 'find', 'form_input', 'navigate', 'get_page_text',
-                    'javascript_tool', 'upload_image', 'read_console_messages', 'read_network_requests', 'resize_window'];
+                    'javascript_tool', 'upload_image', 'read_console_messages', 'read_network_requests', 'resize_window', 'solve_captcha'];
   if (tabId && tabTools.includes(toolName)) {
     const validation = await validateTabInGroup(tabId);
     if (!validation.valid) {
@@ -755,6 +838,17 @@ async function executeTool(toolName, toolInput) {
 
             // Use CDP for screenshot (like Claude in Chrome)
             await ensureDebugger(tabId);
+
+            // Simulate idle mouse movements while "looking" at the page (anti-bot detection)
+            try {
+              const numMovements = 1 + Math.floor(Math.random() * 2);
+              for (let i = 0; i < numMovements; i++) {
+                await simulateIdleMovement(tabId, sendDebuggerCommand);
+                await new Promise(r => setTimeout(r, 30 + Math.random() * 50));
+              }
+            } catch (e) {
+              console.warn('Mouse simulation during screenshot failed:', e);
+            }
 
             // Get viewport info and DPR from tab
             const viewportInfo = await chrome.scripting.executeScript({
@@ -880,11 +974,8 @@ async function executeTool(toolName, toolInput) {
           // Record tabs before click to detect new ones
           const tabsBeforeClick = new Set(agentOpenedTabs);
 
-          // Move mouse first
-          await sendDebuggerCommand(tabId, 'Input.dispatchMouseEvent', {
-            type: 'mouseMoved', x, y, button: 'none', buttons: 0, modifiers,
-          });
-          await new Promise(r => setTimeout(r, 50));
+          // Simulate human-like mouse movement to target (builds up movement count/distance)
+          await simulateMouseMovement(tabId, x, y, sendDebuggerCommand);
 
           // Click
           for (let i = 1; i <= clickCount; i++) {
@@ -1026,6 +1117,9 @@ async function executeTool(toolName, toolInput) {
 
           const [x, y] = toolInput.coordinate || [400, 300];
 
+          // Simulate mouse movement to scroll position (anti-detection)
+          await simulateMouseMovement(tabId, x, y, sendDebuggerCommand);
+
           // Find scrollable container at coordinates and scroll it (like Claude in Chrome)
           // Uses behavior: "instant" for immediate scroll, falls back to window.scrollBy
           const scrollResult = await sendToContent(tabId, 'FIND_AND_SCROLL', {
@@ -1055,6 +1149,20 @@ async function executeTool(toolName, toolInput) {
     // READ_PAGE TOOL
     // ----------------------------------------
     case 'read_page': {
+      // Simulate some idle mouse movements while "reading" the page (anti-bot detection)
+      try {
+        await ensureDebugger(tabId);
+        // Generate 2-4 small random movements to simulate scanning the page
+        const numMovements = 2 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < numMovements; i++) {
+          await simulateIdleMovement(tabId, sendDebuggerCommand);
+          await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+        }
+      } catch (e) {
+        // Don't fail read_page if mouse simulation fails
+        console.warn('Mouse simulation during read_page failed:', e);
+      }
+
       const result = await sendToContent(tabId, 'READ_PAGE', {
         filter: toolInput.filter || 'interactive',  // Default to 'interactive' like Claude in Chrome
         depth: toolInput.depth || 15,
@@ -1129,6 +1237,20 @@ ERROR: explanation`;
     // FORM_INPUT TOOL
     // ----------------------------------------
     case 'form_input': {
+      // Simulate mouse movement to the form field (anti-bot detection)
+      try {
+        const rectResult = await sendToContent(tabId, 'GET_ELEMENT_RECT', { ref: toolInput.ref });
+        if (rectResult.success && rectResult.rect) {
+          const rect = rectResult.rect;
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          await simulateMouseMovement(tabId, centerX, centerY, sendDebuggerCommand);
+        }
+      } catch (e) {
+        // Don't fail form input if mouse simulation fails
+        console.warn('Mouse simulation before form_input failed:', e);
+      }
+
       const result = await sendToContent(tabId, 'FORM_INPUT', {
         ref: toolInput.ref,
         value: toolInput.value,
@@ -1470,6 +1592,28 @@ ERROR: explanation`;
     }
 
     // ----------------------------------------
+    // TABS_CLOSE TOOL
+    // ----------------------------------------
+    case 'tabs_close': {
+      const closeTabId = toolInput.tabId;
+      if (!closeTabId) {
+        return 'Error: tabId is required';
+      }
+      try {
+        // Check if tab exists
+        await chrome.tabs.get(closeTabId);
+        // Close the tab
+        await chrome.tabs.remove(closeTabId);
+        // Clean up tracking
+        agentOpenedTabs.delete(closeTabId);
+        clearMousePosition(closeTabId);
+        return `Successfully closed tab ${closeTabId}`;
+      } catch (e) {
+        return `Error closing tab ${closeTabId}: ${e.message}`;
+      }
+    }
+
+    // ----------------------------------------
     // UPDATE_PLAN TOOL
     // ----------------------------------------
     case 'update_plan': {
@@ -1599,6 +1743,71 @@ ERROR: explanation`;
     }
 
     // ----------------------------------------
+    // SOLVE_CAPTCHA TOOL
+    // ----------------------------------------
+    case 'solve_captcha': {
+      const data = capturedCaptchaData.get(tabId);
+      if (!data) {
+        return 'No CAPTCHA data captured. Make sure to take a screenshot first (attaches debugger), then navigate to the CAPTCHA page.';
+      }
+
+      // Get the domain from the current tab
+      let domain = 'deckathon-concordia.com'; // Default for now
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.url) {
+          domain = new URL(tab.url).hostname.replace('www.', '');
+        }
+      } catch (e) {}
+
+      const { imageUrls, encryptedAnswer, challengeType } = data;
+      const result = await solveCaptcha(domain, challengeType, imageUrls, encryptedAnswer);
+
+      if (result.success) {
+        // Auto-click the correct images and submit via JavaScript injection
+        try {
+          await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: (indices) => {
+              // Find all CAPTCHA images and click the correct ones
+              const images = document.querySelectorAll('img[src*="captcha"]');
+              indices.forEach(idx => {
+                if (images[idx]) {
+                  images[idx].click();
+                }
+              });
+              // Click the Verify/Submit button after a short delay
+              setTimeout(() => {
+                const verifyBtn = document.querySelector('button[type="submit"], button:contains("Verify"), button:contains("Submit")')
+                  || [...document.querySelectorAll('button')].find(b => /verify|submit/i.test(b.textContent));
+                if (verifyBtn) verifyBtn.click();
+              }, 500);
+            },
+            args: [result.indices]
+          });
+        } catch (e) {
+          // If auto-click fails, return indices for manual clicking
+          return JSON.stringify({
+            success: true,
+            indices: result.indices,
+            autoClicked: false,
+            message: `Auto-click failed. Manually click images at positions: ${result.indices.join(', ')} then click Verify`
+          });
+        }
+
+        return JSON.stringify({
+          success: true,
+          indices: result.indices,
+          autoClicked: true,
+          message: `CAPTCHA solved! Images clicked and submitted automatically. Wait for page to proceed.`,
+          responseData: result.responseData
+        });
+      }
+      return JSON.stringify({ success: false, error: result.error });
+    }
+
+    // ----------------------------------------
     // RESIZE_WINDOW TOOL
     // ----------------------------------------
     case 'resize_window': {
@@ -1655,7 +1864,7 @@ ERROR: explanation`;
 // AGENT LOOP
 // ============================================
 
-async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBeforeActing = true, existingHistory = []) {
+async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBeforeActing = true, existingHistory = []) {
   await clearLog();
   await log('START', 'Agent loop started', { tabId: initialTabId, task: task.substring(0, 100) });
 
@@ -1681,14 +1890,16 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
     // Tab not accessible, use defaults
   }
 
-  // Build new user message with optional image and system-reminders (matching Claude in Chrome format)
+  // Build new user message with optional images and system-reminders (matching Claude in Chrome format)
   const userContent = [];
 
-  // Add image first if present
-  if (image) {
-    const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
-    const mediaType = image.match(/^data:(image\/\w+);/)?.[1] || 'image/png';
-    userContent.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } });
+  // Add images first if present
+  if (images && images.length > 0) {
+    for (const image of images) {
+      const base64Data = image.replace(/^data:image\/\w+;base64,/, '');
+      const mediaType = image.match(/^data:(image\/\w+);/)?.[1] || 'image/png';
+      userContent.push({ type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Data } });
+    }
   }
 
   // Add task text
@@ -1809,7 +2020,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, image = null, askBefor
 // TASK MANAGEMENT
 // ============================================
 
-async function startTask(tabId, task, shouldAskBeforeActing = true, image = null) {
+async function startTask(tabId, task, shouldAskBeforeActing = true, images = []) {
   // Reset state for new task (but preserve conversation history)
   sessionTabGroupId = null;
   agentOpenedTabs.clear();  // Clear tracked tabs from previous session
@@ -1832,7 +2043,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, image = null
     const result = await runAgentLoop(tabId, task, update => {
       currentTask.steps.push(update);
       chrome.runtime.sendMessage({ type: 'TASK_UPDATE', update }).catch(() => {});
-    }, image, askBeforeActing, conversationHistory);
+    }, images, askBeforeActing, conversationHistory);
 
     // Update conversation history with the full message history from this run
     if (result.messages) {
@@ -1906,7 +2117,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   switch (type) {
     case 'START_TASK':
-      startTask(payload.tabId, payload.task, payload.askBeforeActing !== false, payload.image)
+      startTask(payload.tabId, payload.task, payload.askBeforeActing !== false, payload.images || [])
         .then(result => sendResponse({ success: true, result }))
         .catch(error => sendResponse({ success: false, error: error.message }));
       return true;
