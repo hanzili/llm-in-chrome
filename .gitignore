@@ -2,7 +2,8 @@
 reference/
 
 # Unused code
-docs/
+docs/*
+!docs/architecture-diagram.png
 profiles/
 src/popup/
 src/types/

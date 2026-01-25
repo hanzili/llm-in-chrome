@@ -1,15 +1,16 @@
 # GitHub Repository Settings
 
 ## Description
-AI copilot for Chrome. Automate web tasks with natural language using Claude, GPT-4, or Gemini.
+LLM-agnostic AI copilot for Chrome. Automate web tasks with natural language using any LLM - Claude, GPT, Gemini, or custom.
 
 ## Topics (Tags)
 ```
 chrome-extension
 ai-agent
 llm
+llm-agnostic
 claude
-gpt-4
+gpt
 gemini
 browser-automation
 web-automation
@@ -17,8 +18,10 @@ chrome
 ai-copilot
 anthropic
 openai
+google
 autonomous-agent
 computer-use
+domain-knowledge
 ```
 
 ## How to Set These

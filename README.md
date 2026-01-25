@@ -2,7 +2,20 @@
 
 Your AI copilot for the web. Automate tasks, navigate sites, and complete workflows with large language models directly in Chrome.
 
-**[Watch Demo Video](https://youtu.be/cal0k351Rwo)**
+**LLM-agnostic**: Works with any language model - Claude, GPT, Gemini, or your own custom API.
+
+---
+
+## Demo
+
+<details open>
+<summary>Watch the full demo video</summary>
+
+[![LLM in Chrome Demo](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
+
+See the AI agent autonomously navigate websites, fill forms, and complete multi-step workflows.
+
+</details>
 
 ---
 
@@ -10,13 +23,29 @@ Your AI copilot for the web. Automate tasks, navigate sites, and complete workfl
 
 LLM in Chrome is a Chrome extension that brings autonomous AI agents to your browser. Describe what you want in plain English, and the AI navigates websites, fills forms, extracts information, and completes multi-step workflows on your behalf.
 
+## Architecture
+
+![Architecture Diagram](docs/architecture-diagram.png)
+
+The extension provides the AI with a **tool suite** for browser interaction:
+
+- **computer** - Take screenshots, click elements, type text, scroll
+- **navigate** - Control URL navigation (go to, back, forward, reload)
+- **read_page** - Extract page structure via accessibility tree
+- **javascript_tool** - Execute JavaScript in page context
+- **solve_captcha** - Automated CAPTCHA solving (brute force)
+- **tabs_context** - Manage multiple tabs
+
+Combined with **domain-specific knowledge**, the agent chooses the right approach for each site.
+
 ## Key Features
 
+- **LLM-Agnostic** - Use any language model (Claude, GPT, Gemini, or custom)
 - **Natural Language Control** - Describe tasks in plain English
 - **Visual Understanding** - AI sees and understands web pages
 - **Autonomous Actions** - Automated clicking, typing, navigation, and scrolling
 - **Multi-Step Workflows** - Handles complex tasks across multiple pages
-- **Domain Intelligence** - Built-in knowledge for Gmail, LinkedIn, GitHub, and more
+- **Domain Intelligence** - Site-specific strategies and patterns
 - **Multi-Modal Input** - Supports text and image inputs
 - **Real-Time Streaming** - See the AI's reasoning as it works
 - **Privacy First** - Runs locally, your data stays private
@@ -37,20 +66,53 @@ LLM in Chrome is a Chrome extension that brings autonomous AI agents to your bro
 3. Configure your AI provider
    - Click the extension icon
    - Open Settings
-   - Select your AI provider (Claude, OpenAI, Gemini, or Custom)
+   - Select your AI provider (Anthropic, OpenAI, Google, OpenRouter, or Custom)
    - Add your API credentials
    - Choose your model
 
-## Supported AI Models
+## Supported Models
 
-| Provider | Models | Notes |
-|----------|--------|-------|
-| Anthropic Claude | Opus 4.5, Sonnet 4, Haiku 4.5 | Best for complex tasks |
-| OpenAI | GPT-4, GPT-5 | Strong all-around performance |
-| Google Gemini | 2.0 Flash, 2.0 Pro | Fast and cost-effective |
-| Custom | Any OpenAI-compatible API | Bring your own endpoint |
+| Provider | Models |
+|----------|--------|
+| **Anthropic** | Opus 4.5, Opus 4, Sonnet 4, Haiku 4.5 |
+| **OpenAI** | GPT-5, GPT-5 Mini, GPT-4.1, GPT-4o, o3, o4-mini |
+| **Google** | Gemini 3 Pro, Gemini 2.5 Flash, Gemini 2.5 Pro |
+| **OpenRouter** | Access to all major models through one API |
+| **Custom** | Any OpenAI-compatible API endpoint |
 
 Default: **Claude Sonnet 4**
+
+## Domain-Specific Knowledge
+
+Each website is built differently and requires different interaction strategies. LLM in Chrome comes with **built-in knowledge** for popular sites that tells the agent:
+
+- **Which approach to use**: Vision-first (screenshots), JavaScript injection, or accessibility tree navigation
+- **Site-specific patterns**: Where buttons are located, how forms work, keyboard shortcuts
+- **Anti-bot bypasses**: Techniques for sites with CAPTCHA or bot detection
+- **Best practices**: Optimal workflows for common tasks on each platform
+
+### Supported Sites
+
+- **Productivity**: Gmail, Google Docs/Sheets/Drive, Notion, Slack, Calendar
+- **Development**: GitHub
+- **Social**: LinkedIn, Twitter/X
+- **Commerce**: Amazon
+
+### Why This Matters
+
+Without domain knowledge, the AI might:
+- Use the wrong tool for the task (e.g., trying to click a canvas-based UI)
+- Miss keyboard shortcuts or efficient workflows
+- Trigger bot detection systems
+- Fail to handle site-specific quirks
+
+With domain knowledge, the agent:
+- Chooses the optimal strategy for each site
+- Works faster and more reliably
+- Handles edge cases and anti-bot measures
+- Adapts to site-specific patterns
+
+**You can add your own domain knowledge** or override built-in rules for any site through the Settings panel.
 
 ## Use Cases
 
@@ -78,16 +140,6 @@ Default: **Claude Sonnet 4**
 - Book appointments
 - Track packages and orders
 
-## Built-in Site Knowledge
-
-Pre-configured domain knowledge for:
-- **Productivity**: Gmail, Google Docs/Sheets, Notion, Slack
-- **Development**: GitHub, Stack Overflow
-- **Social**: LinkedIn, Twitter/X
-- **Commerce**: Amazon, eBay
-
-Custom site rules can be added or overridden per domain.
-
 ## Privacy & Security
 
 - **Local-first**: All processing on your machine
@@ -102,6 +154,7 @@ Contributions welcome:
 - Feature suggestions
 - Documentation improvements
 - Code contributions
+- New domain knowledge for additional sites
 
 Open an issue or submit a pull request.
 
