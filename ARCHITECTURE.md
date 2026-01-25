@@ -24,6 +24,7 @@ graph LR
     subgraph AI["🤖 AI Providers"]
         Claude["Anthropic Claude<br/>Sonnet 4 default"]
         OpenAI["OpenAI<br/>GPT-4/5"]
+        Gemini["Google Gemini<br/>2.0 Flash/Pro"]
         Custom["Custom APIs"]
     end
 
@@ -39,10 +40,12 @@ graph LR
 
     SW -.->|API Request| Claude
     SW -.->|API Request| OpenAI
+    SW -.->|API Request| Gemini
     SW -.->|API Request| Custom
 
     Claude -.->|Stream| SW
     OpenAI -.->|Stream| SW
+    Gemini -.->|Stream| SW
     Custom -.->|Stream| SW
 
     Skills -.->|Inject on nav| SW
@@ -87,9 +90,9 @@ graph LR
 ### 3. AI Providers
 
 **Supported Models**
-- **Anthropic Claude**: Opus 4.5, Sonnet 4, Haiku 4.5
-- **OpenAI**: GPT-4, GPT-5 (via Codex)
-- **GitHub Copilot**: Chat & completions
+- **Anthropic Claude**: Opus 4.5, Sonnet 4 (default), Haiku 4.5
+- **OpenAI**: GPT-4, GPT-5
+- **Google Gemini**: 2.0 Flash, 2.0 Pro
 - **Custom**: Any OpenAI-compatible API
 
 ### 4. Domain Skills System
@@ -217,6 +220,7 @@ Inject token + call /dropout API:
 **AI Providers**
 - Anthropic Claude API (Messages API)
 - OpenAI API (Chat Completions)
+- Google Gemini API
 - Any OpenAI-compatible API
 
 ---
