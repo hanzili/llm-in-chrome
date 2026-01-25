@@ -5,8 +5,6 @@
  * - Pulsing teal glow border around the viewport
  * - "Stop" button at the bottom of the page
  * - Static indicator when agent is active in tab group
- *
- * Based on Claude in Chrome's agent-visual-indicator.js
  */
 
 (function() {

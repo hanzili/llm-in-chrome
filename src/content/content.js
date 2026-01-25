@@ -61,13 +61,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 /**
  * Handle read_page tool
- * Uses Claude in Chrome compatible function signature
  */
 function handleReadPage(payload, sendResponse) {
   try {
     const { filter = 'all', depth = 15, maxChars = 50000, ref_id = null } = payload || {};
 
-    // Call with positional args matching Claude in Chrome: (filter, maxDepth, maxChars, refId)
+    // Call with positional args: (filter, maxDepth, maxChars, refId)
     const result = window.__generateAccessibilityTree(filter, depth, maxChars, ref_id);
 
     // Result is { pageContent, viewport, error? }
@@ -94,7 +93,6 @@ function handleReadPage(payload, sendResponse) {
 
 /**
  * Handle form_input tool
- * Matches Claude in Chrome's implementation exactly
  */
 function handleFormInput(payload, sendResponse) {
   try {
@@ -102,10 +100,10 @@ function handleFormInput(payload, sendResponse) {
 
     // Get element by ref
     let element = null;
-    if (window.__claudeElementMap && window.__claudeElementMap[ref]) {
-      element = window.__claudeElementMap[ref].deref() || null;
+    if (window.__elementMap && window.__elementMap[ref]) {
+      element = window.__elementMap[ref].deref() || null;
       if (element && !document.contains(element)) {
-        delete window.__claudeElementMap[ref];
+        delete window.__elementMap[ref];
         element = null;
       }
     }
@@ -118,7 +116,7 @@ function handleFormInput(payload, sendResponse) {
       return;
     }
 
-    // Scroll element into view first (like Claude in Chrome)
+    // Scroll element into view first
     element.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
     // Handle SELECT elements
@@ -245,7 +243,7 @@ function handleFormInput(payload, sendResponse) {
       element.value = String(value);
       element.focus();
 
-      // Move cursor to end (like Claude in Chrome)
+      // Move cursor to end
       if (element instanceof HTMLTextAreaElement ||
           (element instanceof HTMLInputElement &&
            ['text', 'search', 'url', 'tel', 'password'].includes(element.type))) {
@@ -398,10 +396,10 @@ function handleClickRef(payload, sendResponse) {
       return;
     }
 
-    // Scroll into view EXACTLY like Claude in Chrome
+    // Scroll into view
     element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
 
-    // Force reflow like Claude in Chrome
+    // Force reflow
     if (element instanceof HTMLElement) {
       void element.offsetHeight;
     }
@@ -453,10 +451,10 @@ function handleScrollToElement(payload, sendResponse) {
     const { ref } = payload;
 
     let element = null;
-    if (window.__claudeElementMap && window.__claudeElementMap[ref]) {
-      element = window.__claudeElementMap[ref].deref() || null;
+    if (window.__elementMap && window.__elementMap[ref]) {
+      element = window.__elementMap[ref].deref() || null;
       if (element && !document.contains(element)) {
-        delete window.__claudeElementMap[ref];
+        delete window.__elementMap[ref];
         element = null;
       }
     }
@@ -494,10 +492,10 @@ function handleUploadImage(payload, sendResponse) {
     // If ref is provided, upload to file input
     if (ref) {
       let element = null;
-      if (window.__claudeElementMap && window.__claudeElementMap[ref]) {
-        element = window.__claudeElementMap[ref].deref() || null;
+      if (window.__elementMap && window.__elementMap[ref]) {
+        element = window.__elementMap[ref].deref() || null;
         if (element && !document.contains(element)) {
-          delete window.__claudeElementMap[ref];
+          delete window.__elementMap[ref];
           element = null;
         }
       }
@@ -555,7 +553,7 @@ function handleUploadImage(payload, sendResponse) {
 
 /**
  * Find scrollable container at coordinates and scroll it
- * Claude in Chrome checks overflowY/X for "auto" or "scroll" to find scrollable parents
+ * Checks overflowY/X for "auto" or "scroll" to find scrollable parents
  */
 function handleFindAndScroll(payload, sendResponse) {
   try {
@@ -590,7 +588,7 @@ function handleFindAndScroll(payload, sendResponse) {
     }
 
     // If we found a scrollable container (not body/html), scroll it
-    // Claude in Chrome uses behavior: "instant" for immediate scroll
+    // Use behavior: "instant" for immediate scroll
     if (scrollContainer && scrollContainer !== document.body && scrollContainer !== document.documentElement && isScrollable(scrollContainer)) {
       scrollContainer.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
       sendResponse({
@@ -600,7 +598,7 @@ function handleFindAndScroll(payload, sendResponse) {
       return;
     }
 
-    // Fallback: scroll the window itself (like Claude in Chrome)
+    // Fallback: scroll the window itself
     window.scrollBy({ left: deltaX, top: deltaY, behavior: 'instant' });
     sendResponse({ scrolledContainer: true, containerType: 'window' });
   } catch (error) {

@@ -2,15 +2,12 @@
  * Accessibility Tree Generator
  *
  * Generates a semantic tree representation of the page for AI navigation.
- * Based on reverse engineering of Claude in Chrome extension v1.0.40.
- *
- * Key innovation: Uses accessibility roles instead of HTML tags,
- * with stable ref IDs for reliable element targeting.
+ * Uses accessibility roles instead of HTML tags for reliable element targeting.
  */
 
-// Global state - matching Claude in Chrome's naming pattern
-window.__claudeElementMap || (window.__claudeElementMap = {});
-window.__claudeRefCounter || (window.__claudeRefCounter = 0);
+// Global state for element tracking
+window.__elementMap || (window.__elementMap = {});
+window.__refCounter || (window.__refCounter = 0);
 
 /**
  * Get element's ARIA role or infer from tag
@@ -161,7 +158,7 @@ function isInteractive(element) {
  */
 function hasSemantic(element) {
   var tag = element.tagName.toLowerCase();
-  // Include structural elements that appear in Claude in Chrome's output
+  // Include structural semantic elements
   return ["h1", "h2", "h3", "h4", "h5", "h6", "nav", "main", "header",
           "footer", "section", "article", "aside", "ul", "ol", "li", "table"].includes(tag) ||
          null !== element.getAttribute("role");
@@ -197,7 +194,6 @@ function shouldInclude(element, options) {
   if (isInteractive(element)) return true;
 
   // For interactive filter, also include semantic elements, images, and text
-  // (matching Claude in Chrome behavior)
   if ("interactive" === options.filter) {
     // Include semantic elements
     if (hasSemantic(element)) return true;
@@ -221,7 +217,6 @@ function shouldInclude(element, options) {
 
 /**
  * Main function: Generate accessibility tree for the page
- * Signature matches Claude in Chrome: (filter, maxDepth, maxChars, refId)
  *
  * @param {string} filter - 'interactive' or 'all' (default: 'all')
  * @param {number} maxDepth - Maximum tree depth (default: 15)
@@ -251,16 +246,16 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
         // Get or create ref ID
         var ref = null;
-        for (var id in window.__claudeElementMap) {
-          if (window.__claudeElementMap[id].deref &&
-              window.__claudeElementMap[id].deref() === element) {
+        for (var id in window.__elementMap) {
+          if (window.__elementMap[id].deref &&
+              window.__elementMap[id].deref() === element) {
             ref = id;
             break;
           }
         }
         if (!ref) {
-          ref = "ref_" + ++window.__claudeRefCounter;
-          window.__claudeElementMap[ref] = new WeakRef(element);
+          ref = "ref_" + ++window.__refCounter;
+          window.__elementMap[ref] = new WeakRef(element);
         }
 
         // Build line: indent + role + name + ref + attributes
@@ -369,19 +364,19 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
         // Get or create ref ID (use special prefix for iframe elements)
         var ref = null;
-        for (var id in window.__claudeElementMap) {
-          if (window.__claudeElementMap[id].deref &&
-              window.__claudeElementMap[id].deref() === element) {
+        for (var id in window.__elementMap) {
+          if (window.__elementMap[id].deref &&
+              window.__elementMap[id].deref() === element) {
             ref = id;
             break;
           }
         }
         if (!ref) {
-          ref = "ref_" + ++window.__claudeRefCounter;
+          ref = "ref_" + ++window.__refCounter;
           // Store element with iframe offset info
-          window.__claudeElementMap[ref] = new WeakRef(element);
-          window.__claudeElementOffsets = window.__claudeElementOffsets || {};
-          window.__claudeElementOffsets[ref] = {
+          window.__elementMap[ref] = new WeakRef(element);
+          window.__elementOffsets = window.__elementOffsets || {};
+          window.__elementOffsets[ref] = {
             x: options.iframeOffsetX || 0,
             y: options.iframeOffsetY || 0
           };
@@ -434,7 +429,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
     // If refId provided, start from that element
     if (refId) {
-      var weakRef = window.__claudeElementMap[refId];
+      var weakRef = window.__elementMap[refId];
       if (!weakRef) {
         return {
           error: "Element with ref_id '" + refId + "' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.",
@@ -459,10 +454,10 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
     }
 
     // Clean up dead references
-    for (var id in window.__claudeElementMap) {
-      var ref = window.__claudeElementMap[id];
+    for (var id in window.__elementMap) {
+      var ref = window.__elementMap[id];
       if (ref.deref && !ref.deref()) {
-        delete window.__claudeElementMap[id];
+        delete window.__elementMap[id];
       }
     }
 
@@ -500,32 +495,31 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
  * Get element by ref ID
  */
 window.__getElementByRef = function(refId) {
-  var weakRef = window.__claudeElementMap[refId];
+  var weakRef = window.__elementMap[refId];
   if (weakRef && weakRef.deref) {
     var element = weakRef.deref();
     if (element && document.contains(element)) {
       return element;
     }
     // Element was garbage collected or removed
-    delete window.__claudeElementMap[refId];
+    delete window.__elementMap[refId];
   }
   return null;
 };
 
 /**
  * Get bounding rect for a ref ID (for coordinate-based actions)
- * Scrolls element into view first (like Claude in Chrome), then returns coordinates.
+ * Scrolls element into view first, then returns coordinates.
  * Includes iframe offset for elements inside iframes.
  */
 window.__getElementRect = function(refId) {
   var element = window.__getElementByRef(refId);
   if (!element) return null;
 
-  // Scroll element into view first - EXACTLY like Claude in Chrome
-  // They use: scrollIntoView({behavior:"instant",block:"center",inline:"center"})
+  // Scroll element into view first
   element.scrollIntoView({ behavior: 'instant', block: 'center', inline: 'center' });
 
-  // Force reflow to ensure scroll is complete (Claude in Chrome does this)
+  // Force reflow to ensure scroll is complete
   if (element instanceof HTMLElement) {
     void element.offsetHeight;
   }
@@ -533,7 +527,7 @@ window.__getElementRect = function(refId) {
   var rect = element.getBoundingClientRect();
 
   // Check if this element has iframe offset
-  var offset = (window.__claudeElementOffsets && window.__claudeElementOffsets[refId]) || { x: 0, y: 0 };
+  var offset = (window.__elementOffsets && window.__elementOffsets[refId]) || { x: 0, y: 0 };
 
   return {
     x: rect.x + offset.x,
@@ -549,10 +543,10 @@ window.__getElementRect = function(refId) {
  * Clear ref mappings (call when navigating to new page)
  */
 window.__clearRefMappings = function() {
-  window.__claudeElementMap = {};
-  window.__claudeElementOffsets = {};
-  window.__claudeRefCounter = 0;
+  window.__elementMap = {};
+  window.__elementOffsets = {};
+  window.__refCounter = 0;
 };
 
 // Expose for debugging
-console.log('[JobApplyAgent] Accessibility tree generator loaded (Claude-compatible)');
+console.log('[LLM in Chrome] Accessibility tree generator loaded');

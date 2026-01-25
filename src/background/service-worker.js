@@ -3,7 +3,7 @@
  *
  * Orchestrates browser automation by:
  * 1. Receiving tasks from the sidepanel
- * 2. Calling Claude API with tools
+ * 2. Calling LLM API with tools
  * 3. Executing tool calls via content scripts
  * 4. Looping until task is complete
  */
@@ -21,7 +21,7 @@ import {
 import {
   loadConfig, getConfig, setConfig, getApiHeaders,
   createAbortController, getAbortController, abortRequest,
-  callClaude, callClaudeSimple
+  callLLM, callLLMSimple
 } from './modules/api.js';
 
 // ============================================
@@ -187,7 +187,7 @@ async function getTabDPR(tabId) {
 
 /**
  * Convert screenshot coordinates to viewport coordinates
- * Used when Claude outputs coordinates based on what it sees in screenshots
+ * Used when LLM outputs coordinates based on what it sees in screenshots
  */
 function screenshotToViewportCoords(screenshotX, screenshotY, context) {
   if (!context) return [screenshotX, screenshotY];
@@ -211,9 +211,9 @@ function getScreenshotContext(imageId) {
 /**
  * Resize a data URL image to account for DPR (device pixel ratio)
  * Screenshots are captured at device resolution (e.g., 2x on Retina)
- * but Claude should see coordinates in CSS/viewport pixels
+ * but LLM should see coordinates in CSS/viewport pixels
  */
-async function resizeScreenshotForClaude(dataUrl, dpr = 2) {
+async function resizeScreenshot(dataUrl, dpr = 2) {
   // Only resize if DPR > 1
   if (dpr <= 1) {
     return dataUrl;
@@ -230,7 +230,7 @@ async function resizeScreenshotForClaude(dataUrl, dpr = 2) {
     const currentWidth = imageBitmap.width;
     const currentHeight = imageBitmap.height;
 
-    // Resize to 1x (CSS pixels) so Claude's coordinates match viewport
+    // Resize to 1x (CSS pixels) so LLM's coordinates match viewport
     const newWidth = Math.round(currentWidth / dpr);
     const newHeight = Math.round(currentHeight / dpr);
 
@@ -278,7 +278,7 @@ let screenshotCounter = 0;
 let taskScreenshots = []; // Screenshots collected during task for logging
 let taskDebugLog = []; // Debug entries collected during task for logging
 
-// Screenshot context tracking (like Claude in Chrome)
+// Screenshot context tracking
 // Maps screenshot ID to {viewportWidth, viewportHeight, screenshotWidth, screenshotHeight, devicePixelRatio}
 let screenshotContexts = new Map();
 
@@ -699,7 +699,7 @@ async function detachDebugger() {
 }
 
 /**
- * Send a debugger command with auto-reattachment (like Claude in Chrome)
+ * Send a debugger command with auto-reattachment
  * If debugger is not attached, reattach and retry the command
  */
 async function sendDebuggerCommand(tabId, method, params = {}) {
@@ -708,7 +708,7 @@ async function sendDebuggerCommand(tabId, method, params = {}) {
   } catch (err) {
     const errMsg = (err instanceof Error ? err.message : String(err)).toLowerCase();
 
-    // If debugger is not attached, reattach and retry (like Claude in Chrome)
+    // If debugger is not attached, reattach and retry
     if (errMsg.includes('not attached') || errMsg.includes('detached')) {
       debuggerAttached = false;
       debuggerTabId = null;
@@ -836,7 +836,7 @@ async function executeTool(toolName, toolInput) {
             // Hide visual indicators before screenshot so they don't appear in the image
             await hideIndicatorsForToolUse(tabId);
 
-            // Use CDP for screenshot (like Claude in Chrome)
+            // Use CDP for screenshot
             await ensureDebugger(tabId);
 
             // Simulate idle mouse movements while "looking" at the page (anti-bot detection)
@@ -1120,7 +1120,7 @@ async function executeTool(toolName, toolInput) {
           // Simulate mouse movement to scroll position (anti-detection)
           await simulateMouseMovement(tabId, x, y, sendDebuggerCommand);
 
-          // Find scrollable container at coordinates and scroll it (like Claude in Chrome)
+          // Find scrollable container at coordinates and scroll it
           // Uses behavior: "instant" for immediate scroll, falls back to window.scrollBy
           const scrollResult = await sendToContent(tabId, 'FIND_AND_SCROLL', {
             x, y, deltaX, deltaY, direction, amount
@@ -1164,13 +1164,13 @@ async function executeTool(toolName, toolInput) {
       }
 
       const result = await sendToContent(tabId, 'READ_PAGE', {
-        filter: toolInput.filter || 'interactive',  // Default to 'interactive' like Claude in Chrome
+        filter: toolInput.filter || 'interactive',  // Default to 'interactive'
         depth: toolInput.depth || 15,
         ref_id: toolInput.ref_id,
         maxChars: toolInput.max_chars || 50000,
       });
       if (result.success) {
-        // Match Claude in Chrome format exactly: elements first, then \n\nViewport at end
+        // Format: elements first, then \n\nViewport at end
         const viewport = result.viewport ? `\n\nViewport: ${result.viewport.width}x${result.viewport.height}` : '';
         return `${result.tree}${viewport}`;
       }
@@ -1206,7 +1206,7 @@ FOUND: 0
 ERROR: explanation`;
 
       try {
-        const aiResponse = await callClaudeSimple(findPrompt, 800);
+        const aiResponse = await callLLMSimple(findPrompt, 800);
         const lines = aiResponse.trim().split('\n').filter(l => l.trim());
         const matches = [];
         let totalFound = 0;
@@ -1326,7 +1326,7 @@ ERROR: explanation`;
         // Escape backticks and dollar signs for template literal safety
         const escapedCode = toolInput.text.replace(/`/g, '\\`').replace(/\$/g, '\\$');
 
-        // Wrap in IIFE with strict mode (matching Claude in Chrome)
+        // Wrap in IIFE with strict mode
         const expression = `
           (function() {
             'use strict';
@@ -1351,7 +1351,7 @@ ERROR: explanation`;
           return `Error: ${result.exceptionDetails.exception?.description || result.exceptionDetails.text || 'Unknown error'}`;
         }
 
-        // Filter sensitive data (matching Claude in Chrome)
+        // Filter sensitive data
         const filterSensitive = (value, depth = 0) => {
           if (depth > 5) return '[TRUNCATED: Max depth exceeded]';
 
@@ -1945,7 +1945,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   // Create tab group for this session
   await ensureTabGroup(initialTabId);
 
-  // Get tab info for system-reminder (matching Claude in Chrome format)
+  // Get tab info for system-reminder
   let tabInfo = { availableTabs: [], initialTabId, domainSkills: [] };
   try {
     const tab = await chrome.tabs.get(initialTabId);
@@ -1965,7 +1965,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     // Tab not accessible, use defaults
   }
 
-  // Build new user message with optional images and system-reminders (matching Claude in Chrome format)
+  // Build new user message with optional images and system-reminders
   const userContent = [];
 
   // Add images first if present
@@ -1980,7 +1980,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   // Add task text
   userContent.push({ type: 'text', text: task });
 
-  // Add tab context as system-reminder (matching Claude in Chrome format)
+  // Add tab context as system-reminder
   userContent.push({
     type: 'text',
     text: `<system-reminder>${JSON.stringify(tabInfo)}</system-reminder>`,
@@ -2019,7 +2019,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
 
     let response;
     try {
-      response = await callClaude(messages, onTextChunk, log);
+      response = await callLLM(messages, onTextChunk, log);
     } catch (error) {
       // Handle abort gracefully
       if (error.name === 'AbortError' || taskCancelled) {
@@ -2058,7 +2058,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
         // Get DPR from the tab to resize screenshot to 1x (CSS pixels)
         const screenshotTabId = toolUse.input?.tabId;
         const dpr = screenshotTabId ? await getTabDPR(screenshotTabId) : 2;
-        const resizedDataUrl = await resizeScreenshotForClaude(result.dataUrl, dpr);
+        const resizedDataUrl = await resizeScreenshot(result.dataUrl, dpr);
         const base64Data = resizedDataUrl.replace(/^data:image\/\w+;base64,/, '');
         toolResults.push({
           type: 'tool_result',

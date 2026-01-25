@@ -1,6 +1,5 @@
 /**
- * Tool Definitions - Exact clone of Claude in Chrome
- * Extracted from Claude in Chrome extension v1.0.40
+ * Tool Definitions for Browser Automation
  */
 
 export const TOOL_DEFINITIONS = [
@@ -457,7 +456,7 @@ export const TOOL_DEFINITIONS = [
             },
             showWatermark: {
               type: 'boolean',
-              description: 'Show Claude logo watermark (default: true)',
+              description: 'Show logo watermark (default: true)',
             },
             quality: {
               type: 'number',

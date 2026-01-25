@@ -1,5 +1,5 @@
 /**
- * Claude API communication module.
+ * LLM API communication module.
  * Handles API calls, streaming responses, and configuration.
  */
 
@@ -92,9 +92,9 @@ export function abortRequest() {
 }
 
 /**
- * Simple Claude API call (for quick tasks like summarization)
+ * Simple LLM API call (for quick tasks like summarization)
  */
-export async function callClaudeSimple(prompt, maxTokens = 800) {
+export async function callLLMSimple(prompt, maxTokens = 800) {
   await loadConfig();
   const response = await fetch(config.apiBaseUrl, {
     method: 'POST',
@@ -112,7 +112,6 @@ export async function callClaudeSimple(prompt, maxTokens = 800) {
 
 /**
  * Add cache_control to the last assistant message for conversation caching.
- * This matches Claude in Chrome's caching strategy.
  */
 function addConversationCaching(messages) {
   if (!messages || messages.length === 0) return messages;
@@ -136,9 +135,9 @@ function addConversationCaching(messages) {
 }
 
 /**
- * Main Claude API call with tools and streaming support
+ * Main LLM API call with tools and streaming support
  */
-export async function callClaude(messages, onTextChunk = null, log = () => {}) {
+export async function callLLM(messages, onTextChunk = null, log = () => {}) {
   await loadConfig();
   await log('API', `Calling API (${config.model})`, { messageCount: messages.length });
 

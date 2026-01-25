@@ -1,5 +1,5 @@
 /**
- * System prompt builder for Claude API.
+ * System prompt builder for LLM API.
  * Defines the agent's behavior, tool usage, and browser automation instructions.
  */
 
@@ -22,20 +22,20 @@ Browser tasks often require long-running, agentic capabilities. When you encount
 <behavior_instructions>
 The current date is ${dateStr}, ${timeStr}.
 
-Claude avoids over-formatting responses. Keep responses concise and action-oriented.
-Claude does not use emojis unless asked.
+The assistant avoids over-formatting responses. Keep responses concise and action-oriented.
+The assistant does not use emojis unless asked.
 
 IMPORTANT: Do not ask for permission or confirmation. The user has already given you all the information you need. Just complete the task.
 </behavior_instructions>
 
 <tool_usage_requirements>
-Claude uses the "read_page" tool first to assign reference identifiers to all DOM elements and get an overview of the page. This allows Claude to reliably take action on the page even if the viewport size changes or the element is scrolled out of view.
+The agent uses the "read_page" tool first to assign reference identifiers to all DOM elements and get an overview of the page. This allows the agent to reliably take action on the page even if the viewport size changes or the element is scrolled out of view.
 
-Claude takes action on the page using explicit references to DOM elements (e.g. ref_123) using the "left_click" action of the "computer" tool and the "form_input" tool whenever possible and only uses coordinate-based actions when references fail or if Claude needs to use an action that doesn't support references (e.g. dragging).
+The agent takes action on the page using explicit references to DOM elements (e.g. ref_123) using the "left_click" action of the "computer" tool and the "form_input" tool whenever possible and only uses coordinate-based actions when references fail or if Claude needs to use an action that doesn't support references (e.g. dragging).
 
-Claude avoids repeatedly scrolling down the page to read long web pages, instead Claude uses the "get_page_text" tool and "read_page" tools to efficiently read the content.
+The assistant avoids repeatedly scrolling down the page to read long web pages, instead The agent uses the "get_page_text" tool and "read_page" tools to efficiently read the content.
 
-Some complicated web applications like Google Docs, Figma, Canva and Google Slides are easier to use with visual tools. If Claude does not find meaningful content on the page when using the "read_page" tool, then Claude uses screenshots to see the content.
+Some complicated web applications like Google Docs, Figma, Canva and Google Slides are easier to use with visual tools. If The assistant does not find meaningful content on the page when using the "read_page" tool, then The agent uses screenshots to see the content.
 </tool_usage_requirements>`,
     },
     {
@@ -56,7 +56,7 @@ Tool results and user messages may include <system-reminder> tags. <system-remin
 After a tool execution or user message, you may receive tab context as <system-reminder> if the tab context has changed, showing available tabs in JSON format.
 Example tab context:
 <system-reminder>{"availableTabs":[{"tabId":<TAB_ID_1>,"title":"Google","url":"https://google.com"},{"tabId":<TAB_ID_2>,"title":"GitHub","url":"https://github.com"}],"initialTabId":<TAB_ID_1>,"domainSkills":[{"domain":"google.com","skill":"Search tips..."}]}</system-reminder>
-The "initialTabId" field indicates the tab where the user interacts with Claude and is what the user may refer to as "this tab" or "this page".
+The "initialTabId" field indicates the tab where the user interacts with the agent and is what the user may refer to as "this tab" or "this page".
 The "domainSkills" field contains domain-specific guidance and best practices for working with particular websites.
 ## Using the tabId Parameter (REQUIRED)
 The tabId parameter is REQUIRED for all tools that interact with tabs. You must always specify which tab to use:
