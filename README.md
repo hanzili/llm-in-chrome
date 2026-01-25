@@ -1,170 +1,95 @@
-# LLM in Chrome
+# llm in chrome
 
-Your AI copilot for the web. Automate tasks, navigate sites, and complete workflows with large language models directly in Chrome.
+open-source claude in chrome that works with any llm.
 
-**LLM-agnostic**: Works with any language model - Claude, GPT, Gemini, or your own custom API.
+## what is this
 
----
+you know claude in chrome? this is basically that but open source and llm-agnostic. tell it what to do in plain english and it navigates websites, fills forms, extracts data, handles multi-step workflows, whatever you need.
 
-## Demo
+runs locally on your machine. you choose which model to use.
 
-<details open>
-<summary>Watch the full demo video</summary>
+## demo
 
-[![LLM in Chrome Demo](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
+[![demo video](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
 
-See the AI agent autonomously navigate websites, fill forms, and complete multi-step workflows.
+shows the agent applying to jobs, unsubscribing from emails in gmail, and completing the deckathon dropout challenge (captchas and anti-bot protections).
 
-</details>
+## how it works
 
----
+![architecture](docs/architecture-diagram.png)
 
-## Overview
+the extension gives your llm a set of tools to interact with the browser:
 
-LLM in Chrome is a Chrome extension that brings autonomous AI agents to your browser. Describe what you want in plain English, and the AI navigates websites, fills forms, extracts information, and completes multi-step workflows on your behalf.
+**computer** - take screenshots, click elements, type text, scroll
 
-## Architecture
+**navigate** - control url navigation
 
-![Architecture Diagram](docs/architecture-diagram.png)
+**read_page** - extract page structure via accessibility tree
 
-The extension provides the AI with a **tool suite** for browser interaction:
+**javascript_tool** - execute javascript in page context
 
-- **computer** - Take screenshots, click elements, type text, scroll
-- **navigate** - Control URL navigation (go to, back, forward, reload)
-- **read_page** - Extract page structure via accessibility tree
-- **javascript_tool** - Execute JavaScript in page context
-- **solve_captcha** - Automated CAPTCHA solving (brute force)
-- **tabs_context** - Manage multiple tabs
+**solve_captcha** - automated captcha solving
 
-Combined with **domain-specific knowledge**, the agent chooses the right approach for each site.
+**tabs_context** - manage multiple tabs
 
-## Key Features
+plus it has domain knowledge. knows google docs is canvas-based so it should use screenshots. github works better with accessibility tree. linkedin needs specific patterns to avoid detection.
 
-- **LLM-Agnostic** - Use any language model (Claude, GPT, Gemini, or custom)
-- **Natural Language Control** - Describe tasks in plain English
-- **Visual Understanding** - AI sees and understands web pages
-- **Autonomous Actions** - Automated clicking, typing, navigation, and scrolling
-- **Multi-Step Workflows** - Handles complex tasks across multiple pages
-- **Domain Intelligence** - Site-specific strategies and patterns
-- **Multi-Modal Input** - Supports text and image inputs
-- **Real-Time Streaming** - See the AI's reasoning as it works
-- **Privacy First** - Runs locally, your data stays private
+you can add your own domain knowledge through settings.
 
-## Installation
+## supported models
 
-1. Clone this repository
-   ```bash
-   git clone https://github.com/hanzili/llm-in-chrome.git
-   ```
+works with any openai-compatible api.
 
-2. Load the extension in Chrome
-   - Navigate to `chrome://extensions/`
-   - Enable **Developer mode**
-   - Click **Load unpacked**
-   - Select the `llm-in-chrome` folder
+**anthropic** - opus 4.5, opus 4, sonnet 4, haiku 4.5
 
-3. Configure your AI provider
-   - Click the extension icon
-   - Open Settings
-   - Select your AI provider (Anthropic, OpenAI, Google, OpenRouter, or Custom)
-   - Add your API credentials
-   - Choose your model
+**openai** - gpt-5, gpt-5 mini, gpt-4.1, gpt-4o, o3, o4-mini
 
-## Supported Models
+**google** - gemini 3 pro, gemini 2.5 flash, gemini 2.5 pro
 
-| Provider | Models |
-|----------|--------|
-| **Anthropic** | Opus 4.5, Opus 4, Sonnet 4, Haiku 4.5 |
-| **OpenAI** | GPT-5, GPT-5 Mini, GPT-4.1, GPT-4o, o3, o4-mini |
-| **Google** | Gemini 3 Pro, Gemini 2.5 Flash, Gemini 2.5 Pro |
-| **OpenRouter** | Access to all major models through one API |
-| **Custom** | Any OpenAI-compatible API endpoint |
+**openrouter** - access to all major models through one api
 
-Default: **Claude Sonnet 4**
+**custom** - any openai-compatible endpoint
 
-## Domain-Specific Knowledge
+## installation
 
-Each website is built differently and requires different interaction strategies. LLM in Chrome comes with **built-in knowledge** for popular sites that tells the agent:
+```bash
+git clone https://github.com/hanzili/llm-in-chrome.git
+```
 
-- **Which approach to use**: Vision-first (screenshots), JavaScript injection, or accessibility tree navigation
-- **Site-specific patterns**: Where buttons are located, how forms work, keyboard shortcuts
-- **Anti-bot bypasses**: Techniques for sites with CAPTCHA or bot detection
-- **Best practices**: Optimal workflows for common tasks on each platform
+1. open chrome://extensions/
+2. enable developer mode
+3. click load unpacked
+4. select the llm-in-chrome folder
+5. click the extension icon, go to settings
+6. choose your llm provider and add api key
 
-### Supported Sites
+## why domain knowledge matters
 
-- **Productivity**: Gmail, Google Docs/Sheets/Drive, Notion, Slack, Calendar
-- **Development**: GitHub
-- **Social**: LinkedIn, Twitter/X
-- **Commerce**: Amazon
+different sites need different approaches.
 
-### Why This Matters
+**vision-first** - google docs, figma, canva (canvas-based uis)
 
-Without domain knowledge, the AI might:
-- Use the wrong tool for the task (e.g., trying to click a canvas-based UI)
-- Miss keyboard shortcuts or efficient workflows
-- Trigger bot detection systems
-- Fail to handle site-specific quirks
+**accessibility tree** - github, gmail (structured content)
 
-With domain knowledge, the agent:
-- Chooses the optimal strategy for each site
-- Works faster and more reliably
-- Handles edge cases and anti-bot measures
-- Adapts to site-specific patterns
+**javascript injection** - sites with dynamic content or anti-bot measures
 
-**You can add your own domain knowledge** or override built-in rules for any site through the Settings panel.
+without domain knowledge the agent uses the wrong tool and fails. with it, works reliably.
 
-## Use Cases
+you can customize or add new domain strategies in settings.
 
-**Web Automation**
-- Fill forms and applications
-- Extract data from multiple pages
-- Navigate complex workflows
-- Submit repetitive tasks
+## use cases
 
-**Research & Productivity**
-- Browse and summarize articles
-- Collect information from multiple sources
-- Compare products or services
-- Monitor website changes
+automate boring web stuff. fill forms, extract data, test workflows, manage emails, apply to jobs, research, accessibility testing.
 
-**Testing & Development**
-- Test user flows and interactions
-- Debug UI issues
-- Verify form validations
-- Check accessibility
+privacy first. runs locally, only sends requests to your chosen llm provider. no tracking, no data collection.
 
-**Personal Assistant**
-- Manage email (Gmail, Outlook)
-- Apply to jobs (LinkedIn, Indeed)
-- Book appointments
-- Track packages and orders
 
-## Privacy & Security
+## what's next
 
-- **Local-first**: All processing on your machine
-- **API-only**: Requests only to your chosen LLM provider
-- **No tracking**: No data collection or storage
-- **Open source**: Full code transparency
+**more user control** - right now domain skills are hardcoded. want to let people customize system prompts, inject custom scripts, and integrate chrome devtools for more device-side control.
 
-## Contributing
+**mcp integration** - could work both ways. as a client it uses any mcp tool to help with tasks. as a server other clients just send it a task and it handles everything autonomously instead of the client orchestrating each step. already been experimenting with this idea in [comet-mcp](https://github.com/hanzili/comet-mcp).
 
-Contributions welcome:
-- Bug reports
-- Feature suggestions
-- Documentation improvements
-- Code contributions
-- New domain knowledge for additional sites
+**better stealth** - cdp gets detected by some sites. thinking about anti-detection browsers in docker with os-level access to look more like a real user.
 
-Open an issue or submit a pull request.
-
-## License
-
-MIT License - see [LICENSE](LICENSE) for details
-
-## Author
-
-**Hanzi Li**
-hanzili0217@gmail.com
-
-Built with inspiration from Claude in Chrome and powered by Anthropic, OpenAI, and Google AI models.
+**more domain knowledge** - expand built-in strategies for popular sites. 
