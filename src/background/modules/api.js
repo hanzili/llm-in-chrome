@@ -5,12 +5,13 @@
 
 import { TOOL_DEFINITIONS } from '../../tools/definitions.js';
 import { buildSystemPrompt } from './system-prompt.js';
+import { DOMAIN_SKILLS } from './domain-skills.js';
 
 // Configuration (loaded from storage)
 let config = {
   apiBaseUrl: 'http://127.0.0.1:8000/claude/v1/messages',
   apiKey: null,
-  model: 'claude-sonnet-4-20250514',
+  model: 'claude-opus-4-5-20251101',
   maxTokens: 10000,
   maxSteps: 0,
 };
@@ -24,9 +25,14 @@ let abortController = null;
 export async function loadConfig() {
   const stored = await chrome.storage.local.get([
     'apiBaseUrl', 'apiKey', 'model', 'maxSteps', 'maxTokens',
-    'providerKeys', 'customModels', 'currentModelIndex'
+    'providerKeys', 'customModels', 'currentModelIndex', 'userSkills'
   ]);
   config = { ...config, ...stored };
+
+  // Include built-in skills for UI display
+  config.builtInSkills = DOMAIN_SKILLS.map(s => ({ domain: s.domain, skill: s.skill }));
+  config.userSkills = stored.userSkills || [];
+
   return config;
 }
 

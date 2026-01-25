@@ -73,8 +73,6 @@ const askToggle = document.getElementById('ask-toggle');
 const stopBtn = document.getElementById('stop-btn');
 const inputContainer = document.getElementById('input-container');
 const imagePreview = document.getElementById('image-preview');
-const previewImg = document.getElementById('preview-img');
-const removeImageBtn = document.getElementById('remove-image-btn');
 
 // State
 let isRunning = false;
@@ -84,7 +82,7 @@ let currentStreamingMessage = null;
 let completedSteps = []; // Array of { tool, input, result, description }
 let pendingStep = null; // Current executing step
 let stepsSection = null;
-let attachedImage = null; // Base64 data URL of attached image
+let attachedImages = []; // Array of base64 data URLs
 
 // Config state
 let providerKeys = {}; // { anthropic: 'sk-...', openai: 'sk-...', ... }
@@ -92,6 +90,11 @@ let customModels = []; // [{ name, baseUrl, modelId, apiKey }, ...]
 let availableModels = []; // Combined list of { name, provider, modelId, baseUrl, apiKey }
 let currentModelIndex = 0;
 let selectedProvider = null;
+
+// Domain skills state
+let userSkills = []; // [{ domain: 'example.com', skill: '...' }, ...]
+let builtInSkills = []; // Loaded from service worker
+let editingSkillIndex = -1; // -1 = adding new, >= 0 = editing existing
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
@@ -149,6 +152,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Add custom model
   document.getElementById('add-custom-btn').addEventListener('click', addCustomModel);
 
+  // Domain skills UI
+  document.getElementById('add-skill-btn').addEventListener('click', addOrUpdateSkill);
+  document.getElementById('add-skill-toggle').addEventListener('click', () => showSkillForm(true));
+  document.getElementById('skill-form-close').addEventListener('click', hideSkillForm);
+  document.getElementById('skill-form-cancel').addEventListener('click', hideSkillForm);
+
   // Ask before acting toggle
   askToggle.addEventListener('click', () => {
     askBeforeActing = !askBeforeActing;
@@ -199,9 +208,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
     }
   });
-
-  // Remove image
-  removeImageBtn.addEventListener('click', removeAttachedImage);
 });
 
 // Listen for messages from service worker
@@ -223,12 +229,15 @@ async function loadConfig() {
   providerKeys = config.providerKeys || {};
   customModels = config.customModels || [];
   currentModelIndex = config.currentModelIndex || 0;
+  userSkills = config.userSkills || [];
+  builtInSkills = config.builtInSkills || [];
 
   buildAvailableModels();
   updateModelDisplay();
   renderModelList();
   updateProviderStatuses();
   renderCustomModelsList();
+  renderSkillsList();
 }
 
 function buildAvailableModels() {
@@ -273,6 +282,7 @@ async function saveConfig() {
       providerKeys,
       customModels,
       currentModelIndex,
+      userSkills,
       // Also set the active model config for the service worker
       ...(availableModels[currentModelIndex] ? {
         model: availableModels[currentModelIndex].modelId,
@@ -349,6 +359,8 @@ function openSettings() {
   document.getElementById('provider-config').style.display = 'none';
   document.querySelectorAll('.provider-card').forEach(c => c.classList.remove('active'));
   renderCustomModelsList();
+  renderSkillsList();
+  hideSkillForm(); // Hide and reset skill form when opening
 }
 
 function closeSettings() {
@@ -474,6 +486,174 @@ function renderCustomModelsList() {
 }
 
 // ============================================
+// DOMAIN SKILLS
+// ============================================
+
+function renderSkillsList() {
+  const listEl = document.getElementById('skills-list');
+  if (!listEl) return;
+
+  // Combine built-in and user skills for display
+  const allSkills = [];
+
+  // Add built-in skills first (with flag)
+  for (const skill of builtInSkills) {
+    allSkills.push({ ...skill, isBuiltIn: true });
+  }
+
+  // Add user skills (may override built-in)
+  for (const skill of userSkills) {
+    // Check if this overrides a built-in skill
+    const builtInIndex = allSkills.findIndex(s => s.domain === skill.domain && s.isBuiltIn);
+    if (builtInIndex >= 0) {
+      // Replace built-in with user version
+      allSkills[builtInIndex] = { ...skill, isBuiltIn: false, overridesBuiltIn: true };
+    } else {
+      allSkills.push({ ...skill, isBuiltIn: false });
+    }
+  }
+
+  if (allSkills.length === 0) {
+    listEl.innerHTML = '<div class="empty-skills">No domain skills yet.<br>Click + to add one.</div>';
+    return;
+  }
+
+  listEl.innerHTML = allSkills.map((skill) => {
+    const preview = skill.skill.substring(0, 80).replace(/\n/g, ' ') + (skill.skill.length > 80 ? '...' : '');
+    const icon = skill.isBuiltIn ? '📦' : '✏️';
+    const userIndex = userSkills.findIndex(s => s.domain === skill.domain);
+
+    return `
+      <div class="skill-item" data-domain="${skill.domain}" data-is-builtin="${skill.isBuiltIn}" data-user-index="${userIndex}">
+        <span class="skill-icon">${icon}</span>
+        <div class="skill-info">
+          <div class="skill-domain">
+            ${skill.domain}
+            ${skill.isBuiltIn ? '<span class="builtin-badge">Built-in</span>' : ''}
+            ${skill.overridesBuiltIn ? '<span class="builtin-badge">Custom</span>' : ''}
+          </div>
+          <div class="skill-preview">${preview}</div>
+        </div>
+        <div class="skill-actions">
+          <button class="edit-btn" title="Edit">Edit</button>
+          ${!skill.isBuiltIn ? `<button class="delete-btn" title="Delete">×</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Attach event handlers - click anywhere on item to edit
+  listEl.querySelectorAll('.skill-item').forEach(item => {
+    const editBtn = item.querySelector('.edit-btn');
+    const deleteBtn = item.querySelector('.delete-btn');
+
+    const handleEdit = (e) => {
+      e.stopPropagation();
+      const domain = item.dataset.domain;
+      const isBuiltIn = item.dataset.isBuiltin === 'true';
+      const userIndex = parseInt(item.dataset.userIndex);
+
+      if (isBuiltIn) {
+        // Edit built-in: pre-fill with built-in content, will create user override
+        const builtIn = builtInSkills.find(s => s.domain === domain);
+        if (builtIn) {
+          editingSkillIndex = -1; // New skill (override)
+          document.getElementById('skill-domain').value = builtIn.domain;
+          document.getElementById('skill-content').value = builtIn.skill;
+          document.getElementById('skill-form-title').textContent = 'Customize Built-in Skill';
+          document.getElementById('add-skill-btn').textContent = 'Save Override';
+          showSkillForm();
+        }
+      } else {
+        // Edit user skill
+        editingSkillIndex = userIndex;
+        const skill = userSkills[userIndex];
+        document.getElementById('skill-domain').value = skill.domain;
+        document.getElementById('skill-content').value = skill.skill;
+        document.getElementById('skill-form-title').textContent = 'Edit Skill';
+        document.getElementById('add-skill-btn').textContent = 'Save Changes';
+        showSkillForm();
+      }
+    };
+
+    editBtn.addEventListener('click', handleEdit);
+
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const userIndex = parseInt(item.dataset.userIndex);
+        if (confirm(`Delete skill for "${userSkills[userIndex].domain}"?`)) {
+          userSkills.splice(userIndex, 1);
+          renderSkillsList();
+          await saveConfig();
+        }
+      });
+    }
+  });
+}
+
+function showSkillForm(isNew = false) {
+  if (isNew) {
+    editingSkillIndex = -1;
+    document.getElementById('skill-domain').value = '';
+    document.getElementById('skill-content').value = '';
+    document.getElementById('skill-form-title').textContent = 'Add New Skill';
+    document.getElementById('add-skill-btn').textContent = 'Save Skill';
+  }
+  document.getElementById('skill-form').classList.remove('hidden');
+}
+
+function hideSkillForm() {
+  document.getElementById('skill-form').classList.add('hidden');
+  cancelSkillEdit();
+}
+
+function editSkill(index) {
+  editingSkillIndex = index;
+  const skill = userSkills[index];
+  document.getElementById('skill-domain').value = skill.domain;
+  document.getElementById('skill-content').value = skill.skill;
+  document.getElementById('skill-form-title').textContent = 'Edit Skill';
+  document.getElementById('add-skill-btn').textContent = 'Save Changes';
+  showSkillForm();
+}
+
+async function addOrUpdateSkill() {
+  const domain = document.getElementById('skill-domain').value.trim().toLowerCase();
+  const skill = document.getElementById('skill-content').value.trim();
+
+  if (!domain || !skill) {
+    alert('Please fill in both domain and tips/guidance');
+    return;
+  }
+
+  if (editingSkillIndex >= 0) {
+    // Update existing
+    userSkills[editingSkillIndex] = { domain, skill };
+  } else {
+    // Check for duplicate user skill
+    const existingIndex = userSkills.findIndex(s => s.domain === domain);
+    if (existingIndex >= 0) {
+      userSkills[existingIndex] = { domain, skill };
+    } else {
+      userSkills.push({ domain, skill });
+    }
+  }
+
+  hideSkillForm();
+  renderSkillsList();
+  await saveConfig();
+}
+
+function cancelSkillEdit() {
+  editingSkillIndex = -1;
+  document.getElementById('skill-domain').value = '';
+  document.getElementById('skill-content').value = '';
+  document.getElementById('skill-form-title').textContent = 'Add New Skill';
+  document.getElementById('add-skill-btn').textContent = 'Save Skill';
+}
+
+// ============================================
 // MESSAGES
 // ============================================
 
@@ -492,13 +672,13 @@ async function sendMessage() {
   completedSteps = [];
   stepsSection = null;
 
-  // Capture image before clearing
-  const imageToSend = attachedImage;
+  // Capture images before clearing
+  const imagesToSend = [...attachedImages];
 
-  addUserMessage(text, imageToSend);
+  addUserMessage(text, imagesToSend);
   inputEl.value = '';
   inputEl.style.height = 'auto';
-  removeAttachedImage();
+  clearAttachedImages();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab) {
@@ -513,7 +693,7 @@ async function sendMessage() {
   try {
     await chrome.runtime.sendMessage({
       type: 'START_TASK',
-      payload: { tabId: tab.id, task: text, askBeforeActing, image: imageToSend },
+      payload: { tabId: tab.id, task: text, askBeforeActing, images: imagesToSend },
     });
   } catch (error) {
     addErrorMessage(`Error: ${error.message}`);
@@ -542,7 +722,6 @@ function handleImageDrop(dataTransfer) {
   for (const file of files) {
     if (file.type.startsWith('image/')) {
       readImageFile(file);
-      break;
     }
   }
 }
@@ -550,32 +729,67 @@ function handleImageDrop(dataTransfer) {
 function readImageFile(file) {
   const reader = new FileReader();
   reader.onload = (e) => {
-    attachedImage = e.target.result;
-    previewImg.src = attachedImage;
-    imagePreview.classList.remove('hidden');
+    attachedImages.push(e.target.result);
+    renderImagePreviews();
   };
   reader.readAsDataURL(file);
 }
 
-function removeAttachedImage() {
-  attachedImage = null;
-  previewImg.src = '';
-  imagePreview.classList.add('hidden');
+function removeAttachedImage(index) {
+  attachedImages.splice(index, 1);
+  renderImagePreviews();
 }
 
-function addUserMessage(text, image = null) {
+function clearAttachedImages() {
+  attachedImages = [];
+  renderImagePreviews();
+}
+
+function renderImagePreviews() {
+  if (attachedImages.length === 0) {
+    imagePreview.classList.add('hidden');
+    imagePreview.innerHTML = '';
+    return;
+  }
+
+  imagePreview.classList.remove('hidden');
+  imagePreview.innerHTML = attachedImages.map((img, i) => `
+    <div class="image-preview-item" data-index="${i}">
+      <img src="${img}" alt="Preview ${i + 1}">
+      <button class="remove-image-btn" data-index="${i}">&times;</button>
+    </div>
+  `).join('');
+
+  // Attach remove handlers
+  imagePreview.querySelectorAll('.remove-image-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      removeAttachedImage(parseInt(btn.dataset.index));
+    });
+  });
+}
+
+function addUserMessage(text, images = []) {
   const el = document.createElement('div');
   el.className = 'message user';
 
-  if (image) {
-    const img = document.createElement('img');
-    img.src = image;
-    img.style.maxWidth = '200px';
-    img.style.maxHeight = '150px';
-    img.style.borderRadius = '8px';
-    img.style.marginBottom = '8px';
-    img.style.display = 'block';
-    el.appendChild(img);
+  if (images.length > 0) {
+    const imagesContainer = document.createElement('div');
+    imagesContainer.style.display = 'flex';
+    imagesContainer.style.flexWrap = 'wrap';
+    imagesContainer.style.gap = '8px';
+    imagesContainer.style.marginBottom = '8px';
+
+    for (const imgSrc of images) {
+      const img = document.createElement('img');
+      img.src = imgSrc;
+      img.style.maxWidth = '150px';
+      img.style.maxHeight = '100px';
+      img.style.borderRadius = '8px';
+      img.style.objectFit = 'cover';
+      imagesContainer.appendChild(img);
+    }
+    el.appendChild(imagesContainer);
   }
 
   if (text) {

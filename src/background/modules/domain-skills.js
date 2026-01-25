@@ -161,8 +161,9 @@ The dropout form has strict activity thresholds you MUST meet before submitting:
 - 15+ total keystrokes
 - 8+ unique keys pressed
 
-**How to pass:**
-1. Use javascript_tool to simulate activity:
+**EXACT FLOW TO ENABLE NEXT BUTTON:**
+1. Select a dropout reason FIRST (required before countdown starts)
+2. Use javascript_tool to simulate activity:
 \`\`\`javascript
 // Simulate mouse movements with direction changes
 for (let i = 0; i < 100; i++) {
@@ -176,9 +177,11 @@ for (let i = 0; i < 100; i++) {
   window.dispatchEvent(new KeyboardEvent('keydown', {key, bubbles: true}));
 });
 \`\`\`
-2. After thresholds are met, a 10-second countdown starts
-3. Continue showing activity during the countdown
-4. Once countdown completes, the form becomes submittable
+3. Once ALL thresholds are met AND reason is selected, a 10-second countdown starts automatically
+4. **CRITICAL: You MUST continue showing activity DURING the countdown** - dispatch at least one mouse/keyboard event during this time
+5. Only after countdown completes WITH activity during it, the Next button enables
+
+**Why this matters:** The countdown sets a flag, but a SEPARATE flag for "activity during countdown" must also be true. Without activity during the 10 seconds, the button stays disabled even after countdown.
 
 ### 1c. Dropout Popup Challenges
 After activity verification, 8 random popup modals appear. You must solve ALL of them.
@@ -238,20 +241,24 @@ if (handle) {
 
 ### 4. Image CAPTCHAs
 
-**"pretty_faces"** (at /dropout) - CANNOT be solved visually
-- Use the solve_captcha tool (handles everything automatically)
+**On /dropout page ONLY - use solve_captcha tool:**
 - Just call: solve_captcha(tabId)
+- The tool brute forces correct images and calls the dropout API directly
+- Wait for page to reload after success
+- If 401 error: Session expired - log in again
+- If entropy error: Complete more activity on the form first
 
-**"select the sun"** - WORDPLAY TRICK
-- "Sun" is a PERSON'S NAME, not the sun in the sky!
-- You must select the image showing a HUMAN FACE (a person named "Sun")
-- **CRITICAL**: Take a screenshot and CAREFULLY examine each of the 9 images
-- Look for a photo of a person/face - ignore all yellow sun/star drawings
-- The human face may be in ANY position in the 3x3 grid, not necessarily the first image
-- Describe what you see in each image before selecting to avoid mistakes
+**On OTHER pages (payment, etc.) - solve visually:**
+- solve_captcha does NOT work outside /dropout (it would break the CAPTCHA)
+- Take a screenshot to see the images clearly
+- Read the category carefully (e.g., "Select all logos", "Select the sun")
+- Click the correct images based on what you see
+- **BEFORE clicking Verify**: Take another screenshot to confirm your selections look correct
+- Check that selected images have a visible border/highlight
+- Only then click Verify
 
-**"select logos"** - Solve visually
-- Select images containing logo designs (Deck logo, Concordia logo)
+**"Select the sun" hint:** "Sun" might be a person's name - look for images of people/humans
+**"Select logos" hint:** Look for Deck logo (overlapping rectangles) or Concordia logo
 
 ### 5. Form Token Expiration
 - Form tokens expire quickly
@@ -288,19 +295,39 @@ If you encounter a new anti-bot challenge:
 /**
  * Get domain skills for a given URL
  * @param {string} url - The URL to check
- * @returns {Array} - Array of matching domain skills
+ * @param {Array} userSkills - Optional array of user-defined skills [{ domain, skill }]
+ * @returns {Array} - Array of matching domain skills (user skills override built-in)
  */
-export function getDomainSkills(url) {
+export function getDomainSkills(url, userSkills = []) {
   if (!url) return [];
 
   try {
     const urlObj = new URL(url);
     const hostname = urlObj.hostname.toLowerCase();
 
-    return DOMAIN_SKILLS.filter(skill => {
-      // Check if the hostname ends with or equals the skill domain
+    const matchSkill = (skill) => {
       return hostname === skill.domain || hostname.endsWith('.' + skill.domain);
-    });
+    };
+
+    // Get matching built-in skills
+    const builtInMatches = DOMAIN_SKILLS.filter(matchSkill);
+
+    // Get matching user skills
+    const userMatches = userSkills.filter(matchSkill);
+
+    // Merge: user skills override built-in for same domain
+    const result = [...builtInMatches];
+    for (const userSkill of userMatches) {
+      const existingIndex = result.findIndex(s => s.domain === userSkill.domain);
+      if (existingIndex >= 0) {
+        // Override built-in with user skill
+        result[existingIndex] = userSkill;
+      } else {
+        result.push(userSkill);
+      }
+    }
+
+    return result;
   } catch {
     return [];
   }

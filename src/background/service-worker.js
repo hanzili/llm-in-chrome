@@ -1269,7 +1269,7 @@ ERROR: explanation`;
         await ensureContentScripts(tabId);
         // Check for domain skills at new location
         const backTab = await chrome.tabs.get(tabId);
-        const backSkills = getDomainSkills(backTab.url);
+        const backSkills = getDomainSkills(backTab.url, getConfig().userSkills || []);
         if (backSkills.length > 0) {
           return `Navigated back to ${backTab.url}\n\n<system-reminder>Domain skills for ${backSkills[0].domain}:\n${backSkills[0].skill}</system-reminder>`;
         }
@@ -1281,7 +1281,7 @@ ERROR: explanation`;
         await ensureContentScripts(tabId);
         // Check for domain skills at new location
         const fwdTab = await chrome.tabs.get(tabId);
-        const fwdSkills = getDomainSkills(fwdTab.url);
+        const fwdSkills = getDomainSkills(fwdTab.url, getConfig().userSkills || []);
         if (fwdSkills.length > 0) {
           return `Navigated forward to ${fwdTab.url}\n\n<system-reminder>Domain skills for ${fwdSkills[0].domain}:\n${fwdSkills[0].skill}</system-reminder>`;
         }
@@ -1295,7 +1295,7 @@ ERROR: explanation`;
       await new Promise(r => setTimeout(r, 2000));
       await ensureContentScripts(tabId);
       // Check for domain skills at new URL
-      const skills = getDomainSkills(fullUrl);
+      const skills = getDomainSkills(fullUrl, getConfig().userSkills || []);
       if (skills.length > 0) {
         return `Navigated to ${fullUrl}\n\n<system-reminder>Domain skills for ${skills[0].domain}:\n${skills[0].skill}</system-reminder>`;
       }
@@ -1751,57 +1751,128 @@ ERROR: explanation`;
         return 'No CAPTCHA data captured. Make sure to take a screenshot first (attaches debugger), then navigate to the CAPTCHA page.';
       }
 
-      // Get the domain from the current tab
+      // Get the domain and URL from the current tab
       let domain = 'deckathon-concordia.com'; // Default for now
+      let currentUrl = '';
       try {
         const tab = await chrome.tabs.get(tabId);
         if (tab.url) {
           domain = new URL(tab.url).hostname.replace('www.', '');
+          currentUrl = tab.url;
         }
       } catch (e) {}
+
+      // Check if we're on the dropout page - only use brute force there
+      // because it consumes the encrypted_answer
+      const isDropoutPage = currentUrl.includes('/dropout');
+      if (!isDropoutPage) {
+        return JSON.stringify({
+          success: false,
+          error: 'solve_captcha only works on the /dropout page. For other CAPTCHAs, solve visually by examining the images and clicking the correct ones.',
+          hint: 'Take a screenshot, identify the correct images based on the category, click them, then click Verify.'
+        });
+      }
 
       const { imageUrls, encryptedAnswer, challengeType } = data;
       const result = await solveCaptcha(domain, challengeType, imageUrls, encryptedAnswer);
 
       if (result.success) {
-        // Auto-click the correct images and submit via JavaScript injection
-        try {
-          await chrome.scripting.executeScript({
-            target: { tabId },
-            world: 'MAIN',
-            func: (indices) => {
-              // Find all CAPTCHA images and click the correct ones
-              const images = document.querySelectorAll('img[src*="captcha"]');
-              indices.forEach(idx => {
-                if (images[idx]) {
-                  images[idx].click();
+        // The brute force solver already called /captcha/submit and got the token.
+        // The encrypted_answer is now consumed, so clicking Verify would fail.
+        //
+        // Solution: Call the /dropout API directly from the page context.
+        // The page has httpOnly cookies for auth, so we use executeScript in MAIN world.
+        const token = result.responseData?.captcha_solved_token;
+
+        if (token) {
+          try {
+            // Call /dropout API directly from page context (has cookies for auth)
+            const apiResult = await chrome.scripting.executeScript({
+              target: { tabId },
+              world: 'MAIN',
+              func: async (captchaToken) => {
+                try {
+                  // Find the app's index module dynamically (path may change between builds)
+                  const scripts = [...document.querySelectorAll('script[type="module"]')];
+                  const indexScript = scripts.find(s => s.src?.includes('/assets/index-'));
+                  const modulePath = indexScript ? new URL(indexScript.src).pathname : '/assets/index-2NyJy0c2.js';
+
+                  // Import the app's axios instance which has withCredentials: true
+                  const indexModule = await import(modulePath);
+                  // Find axios - it's the export with post/get methods
+                  const axios = Object.values(indexModule).find(v =>
+                    v && typeof v.post === 'function' && typeof v.get === 'function'
+                  );
+
+                  if (!axios) {
+                    return { success: false, error: 'Could not find axios instance in module' };
+                  }
+
+                  // Call the dropout API with the token and entropy values
+                  // The server requires entropy values >= 100 for each field
+                  const response = await axios.post('/dropout', {
+                    captcha_solved_token: captchaToken,
+                    keystroke_count: 100,
+                    unique_chars_count: 20,
+                    checkbox_entropy: 150,
+                    confirm_button_entropy: 150,
+                    captcha_entropy: 150,
+                    time_on_page: 180
+                  });
+
+                  // Reload to show success state
+                  window.location.reload();
+
+                  return { success: true, data: response.data };
+                } catch (e) {
+                  return {
+                    success: false,
+                    error: e.response?.data?.detail || e.message,
+                    status: e.response?.status
+                  };
                 }
+              },
+              args: [token]
+            });
+
+            const apiResponse = apiResult[0]?.result;
+
+            if (apiResponse?.success) {
+              return JSON.stringify({
+                success: true,
+                indices: result.indices,
+                message: `CAPTCHA solved and dropout completed! The page will reload to show success.`,
+                important: `DO NOT click anything! The dropout has been processed. Wait for the page to update.`
               });
-              // Click the Verify/Submit button after a short delay
-              setTimeout(() => {
-                const verifyBtn = document.querySelector('button[type="submit"], button:contains("Verify"), button:contains("Submit")')
-                  || [...document.querySelectorAll('button')].find(b => /verify|submit/i.test(b.textContent));
-                if (verifyBtn) verifyBtn.click();
-              }, 500);
-            },
-            args: [result.indices]
-          });
-        } catch (e) {
-          // If auto-click fails, return indices for manual clicking
-          return JSON.stringify({
-            success: true,
-            indices: result.indices,
-            autoClicked: false,
-            message: `Auto-click failed. Manually click images at positions: ${result.indices.join(', ')} then click Verify`
-          });
+            } else {
+              // API call failed - might be session expired or entropy check failed
+              return JSON.stringify({
+                success: true,
+                indices: result.indices,
+                token: token,
+                message: `CAPTCHA solved but dropout API failed: ${apiResponse?.error}. Status: ${apiResponse?.status}`,
+                hint: apiResponse?.status === 401
+                  ? 'Session may have expired. Try logging in again and restarting the dropout process.'
+                  : 'The entropy check may have failed. Try completing more activity on the page first.'
+              });
+            }
+          } catch (e) {
+            console.error('Dropout API call failed:', e);
+            return JSON.stringify({
+              success: true,
+              indices: result.indices,
+              token: token,
+              message: `CAPTCHA solved! Token obtained but API call failed: ${e.message}`,
+              hint: 'Try using javascript_tool to call the dropout API manually with this token.'
+            });
+          }
         }
 
+        // No token in response
         return JSON.stringify({
           success: true,
           indices: result.indices,
-          autoClicked: true,
-          message: `CAPTCHA solved! Images clicked and submitted automatically. Wait for page to proceed.`,
-          responseData: result.responseData
+          message: `CAPTCHA solved! Correct images at indices [${result.indices.join(', ')}]. No token returned.`
         });
       }
       return JSON.stringify({ success: false, error: result.error });
@@ -1868,6 +1939,9 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   await clearLog();
   await log('START', 'Agent loop started', { tabId: initialTabId, task: task.substring(0, 100) });
 
+  // Load config first to ensure userSkills and other settings are available
+  await loadConfig();
+
   // Create tab group for this session
   await ensureTabGroup(initialTabId);
 
@@ -1882,9 +1956,10 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     }];
 
     // Add domain-specific skills if available for this site
-    const skills = getDomainSkills(tab.url);
+    const skills = getDomainSkills(tab.url, getConfig().userSkills || []);
     if (skills.length > 0) {
       tabInfo.domainSkills = skills.map(s => ({ domain: s.domain, skill: s.skill }));
+      await log('SKILLS', `Loaded ${skills.length} domain skill(s) for ${tab.url}`, { domains: skills.map(s => s.domain) });
     }
   } catch (e) {
     // Tab not accessible, use defaults

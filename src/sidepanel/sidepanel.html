@@ -502,7 +502,7 @@
     .modal {
       background: var(--bg-secondary);
       border-radius: 12px;
-      width: 340px;
+      width: 480px;
       max-height: 85vh;
       overflow-y: auto;
       border: 1px solid var(--border);
@@ -852,32 +852,44 @@
       gap: 8px;
       padding: 8px 12px;
       border-bottom: 1px solid var(--border);
+      flex-wrap: wrap;
     }
 
     .image-preview.hidden {
       display: none;
     }
 
-    .image-preview img {
+    .image-preview-item {
+      position: relative;
+      display: inline-block;
+    }
+
+    .image-preview-item img {
       max-height: 60px;
       max-width: 120px;
       border-radius: 6px;
       object-fit: cover;
     }
 
-    .remove-image-btn {
+    .image-preview-item .remove-image-btn {
+      position: absolute;
+      top: -6px;
+      right: -6px;
       background: var(--bg-primary);
       border: none;
       color: var(--text-secondary);
-      width: 20px;
-      height: 20px;
+      width: 18px;
+      height: 18px;
       border-radius: 50%;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 12px;
       line-height: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
-    .remove-image-btn:hover {
+    .image-preview-item .remove-image-btn:hover {
       background: #ff6b6b;
       color: white;
     }
@@ -925,6 +937,166 @@
     .custom-model-item .delete-btn:hover {
       background: rgba(255, 100, 100, 0.2);
       color: #ff6b6b;
+    }
+
+    /* Domain skills section */
+    .skills-section {
+      margin-bottom: 16px;
+    }
+
+    .skills-section-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+
+    .skills-section-title {
+      font-size: 12px;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .btn-icon {
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--border);
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn-icon:hover {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: white;
+    }
+
+    #skills-list {
+      max-height: 250px;
+      overflow-y: auto;
+    }
+
+    /* Domain skills list */
+    .skill-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 10px 12px;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin-bottom: 8px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+
+    .skill-item:hover {
+      border-color: var(--text-muted);
+    }
+
+    .skill-item .skill-icon {
+      font-size: 14px;
+      flex-shrink: 0;
+    }
+
+    .skill-item .skill-info {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .skill-item .skill-domain {
+      font-weight: 500;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .skill-item .skill-domain .builtin-badge {
+      font-size: 9px;
+      padding: 1px 5px;
+      background: var(--bg-primary);
+      border-radius: 4px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .skill-item .skill-preview {
+      font-size: 11px;
+      color: var(--text-muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    .skill-item .skill-actions {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+
+    .skill-item .skill-actions button {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      padding: 4px 6px;
+      border-radius: 4px;
+      font-size: 11px;
+    }
+
+    .skill-item .skill-actions button:hover {
+      background: var(--bg-primary);
+      color: var(--text-primary);
+    }
+
+    .skill-item .skill-actions button.delete-btn:hover {
+      background: rgba(255, 100, 100, 0.2);
+      color: #ff6b6b;
+    }
+
+    /* Skill form */
+    .skill-form {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+
+    .skill-form.hidden {
+      display: none;
+    }
+
+    .skill-form-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      font-weight: 500;
+      font-size: 14px;
+    }
+
+    .skill-form-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 12px;
+    }
+
+    .empty-skills {
+      text-align: center;
+      padding: 20px;
+      color: var(--text-muted);
+      font-size: 13px;
     }
   </style>
 </head>
@@ -977,6 +1149,7 @@
         <div class="tabs">
           <button class="tab active" data-tab="providers">Providers</button>
           <button class="tab" data-tab="custom">Custom</button>
+          <button class="tab" data-tab="skills">Skills</button>
         </div>
 
         <!-- Providers Tab -->
@@ -1037,13 +1210,50 @@
           </div>
           <div class="form-group">
             <label class="form-label">Model ID</label>
-            <input type="text" class="form-input" id="custom-model-id" placeholder="claude-sonnet-4-20250514">
+            <input type="text" class="form-input" id="custom-model-id" placeholder="claude-opus-4-5-20251101">
           </div>
           <div class="form-group">
             <label class="form-label">API Key (optional)</label>
             <input type="password" class="form-input" id="custom-api-key" placeholder="sk-...">
           </div>
           <button class="btn btn-primary" id="add-custom-btn" style="width: 100%;">Add Model</button>
+        </div>
+
+        <!-- Skills Tab -->
+        <div class="tab-content" id="tab-skills">
+          <!-- Skills List Section -->
+          <div class="skills-section">
+            <div class="skills-section-header">
+              <span class="skills-section-title">Domain Skills</span>
+              <button class="btn-icon" id="add-skill-toggle" title="Add new skill">+</button>
+            </div>
+            <div id="skills-list"></div>
+          </div>
+
+          <!-- Add/Edit Form (hidden by default) -->
+          <div id="skill-form" class="skill-form hidden">
+            <div class="skill-form-header">
+              <span id="skill-form-title">Add New Skill</span>
+              <button class="btn-icon" id="skill-form-close" title="Cancel">×</button>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Domain</label>
+              <input type="text" class="form-input" id="skill-domain" placeholder="example.com">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Tips / Guidance</label>
+              <textarea class="form-input" id="skill-content" rows="6" placeholder="Navigation tips, form patterns, keyboard shortcuts...
+
+Example:
+- Click 'Easy Apply' button if available
+- Use Jobs tab for job search
+- Profile sections are collapsible" style="resize: vertical; min-height: 120px;"></textarea>
+            </div>
+            <div class="skill-form-actions">
+              <button class="btn btn-secondary" id="skill-form-cancel">Cancel</button>
+              <button class="btn btn-primary" id="add-skill-btn">Save Skill</button>
+            </div>
+          </div>
         </div>
       </div>
       <div class="modal-footer">
@@ -1077,11 +1287,8 @@
   <!-- Input area -->
   <div class="input-area">
     <div class="input-container" id="input-container">
-      <!-- Image preview -->
-      <div class="image-preview hidden" id="image-preview">
-        <img id="preview-img" src="" alt="Preview">
-        <button class="remove-image-btn" id="remove-image-btn">&times;</button>
-      </div>
+      <!-- Image preview (dynamically populated) -->
+      <div class="image-preview hidden" id="image-preview"></div>
       <textarea
         id="input"
         placeholder="What do you want to do?"

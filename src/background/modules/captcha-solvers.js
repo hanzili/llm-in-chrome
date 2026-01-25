@@ -8,7 +8,9 @@
 const SOLVERS = {
   'deckathon-concordia.com': {
     'pretty_faces': bruteForceSolver,
-    'select_songs': bruteForceSolver, // Same approach works
+    'select_songs': bruteForceSolver,
+    'sun': bruteForceSolver,  // "Select the sun" - brute force works
+    'logos': bruteForceSolver, // "Select logos" - brute force works
   }
 };
 
