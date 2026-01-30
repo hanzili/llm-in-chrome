@@ -1,12 +1,32 @@
-# Reference files
+# Reference files (reverse engineering notes)
 reference/
+*-claude.js
+*-claude.ts
+
+# Personal/dev documentation
+LEARNING_ROADMAP.md
+STRUCTURED_LOGGING.md
+*.local.md
 
 # Unused code
 docs/*
 !docs/architecture-diagram.png
 profiles/
 src/popup/
-src/types/
+
+# Development scripts and dependencies
+scripts/
+node_modules/
+package-lock.json
+
+# Test files and coverage
+tests/
+coverage/
+*.test.js
+*.coverage.test.js
+test-*.html
+test-*.mjs
+test-*.js
 
 # OS files
 .DS_Store
@@ -21,5 +41,14 @@ Thumbs.db
 # Logs
 *.log
 
+# API Keys (never commit!)
+.api-keys
+*.pem
+key.pem
+
+# Archived documentation
 ARCHITECTURE.md
 SPEC-dual-mode.md
+
+# Claude Code
+.claude/

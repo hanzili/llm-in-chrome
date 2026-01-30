@@ -1,0 +1,14 @@
+{
+  "entry": [
+    "src/background/service-worker.js",
+    "src/content/content.js",
+    "src/content/accessibility-tree.js",
+    "src/content/agent-visual-indicator.js",
+    "src/sidepanel/sidepanel.js"
+  ],
+  "project": ["src/**/*.js"],
+  "ignore": [
+    "src/popup/**",
+    "node_modules/**"
+  ]
+}

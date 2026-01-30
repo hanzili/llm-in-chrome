@@ -6,13 +6,15 @@
  * to detect automation.
  */
 
+import { VIEWPORT, MOUSE } from './constants.js';
+
 // Track last known mouse position (per tab)
 const lastMousePosition = new Map();
 
 /**
  * Get last mouse position for a tab, or generate a random starting position
  */
-export function getLastPosition(tabId, viewportWidth = 1920, viewportHeight = 1080) {
+export function getLastPosition(tabId, viewportWidth = VIEWPORT.DEFAULT_WIDTH, viewportHeight = VIEWPORT.DEFAULT_HEIGHT) {
   if (lastMousePosition.has(tabId)) {
     return lastMousePosition.get(tabId);
   }
@@ -52,10 +54,10 @@ export function clearPosition(tabId) {
  */
 export function generateMousePath(startX, startY, endX, endY, options = {}) {
   const {
-    minSteps = 10,
-    stepsPerPixel = 50, // One step per N pixels of distance
+    minSteps = MOUSE.MIN_STEPS,
+    stepsPerPixel = MOUSE.STEPS_PER_PIXEL, // One step per N pixels of distance
     totalDuration = null, // Total duration in ms, or null to calculate
-    jitterAmount = 1, // Max jitter in pixels
+    jitterAmount = MOUSE.JITTER_AMOUNT, // Max jitter in pixels
   } = options;
 
   // Calculate distance
@@ -67,7 +69,7 @@ export function generateMousePath(startX, startY, endX, endY, options = {}) {
   const steps = Math.max(minSteps, Math.floor(distance / stepsPerPixel));
 
   // Calculate duration (200-600ms based on distance, or use provided)
-  const duration = totalDuration ?? Math.min(600, Math.max(200, distance * 0.5));
+  const duration = totalDuration ?? Math.min(MOUSE.DURATION_MAX, Math.max(MOUSE.DURATION_MIN, distance * 0.5));
   const delayPerStep = duration / steps;
 
   const path = [];
@@ -109,7 +111,7 @@ export async function simulateMouseMovement(
   sendDebuggerCommand,
   options = {}
 ) {
-  const { viewportWidth = 1920, viewportHeight = 1080 } = options;
+  const { viewportWidth = VIEWPORT.DEFAULT_WIDTH, viewportHeight = VIEWPORT.DEFAULT_HEIGHT } = options;
 
   // Get starting position
   const start = getLastPosition(tabId, viewportWidth, viewportHeight);
@@ -149,12 +151,12 @@ export async function simulateIdleMovement(
   sendDebuggerCommand,
   options = {}
 ) {
-  const { viewportWidth = 1920, viewportHeight = 1080 } = options;
+  const { viewportWidth = VIEWPORT.DEFAULT_WIDTH, viewportHeight = VIEWPORT.DEFAULT_HEIGHT } = options;
 
   const current = getLastPosition(tabId, viewportWidth, viewportHeight);
 
   // Small random movement (10-50 pixels in random direction)
-  const distance = 10 + Math.random() * 40;
+  const distance = MOUSE.IDLE_DISTANCE_MIN + Math.random() * (MOUSE.IDLE_DISTANCE_MAX - MOUSE.IDLE_DISTANCE_MIN);
   const angle = Math.random() * Math.PI * 2;
   const targetX = Math.max(0, Math.min(viewportWidth, current.x + Math.cos(angle) * distance));
   const targetY = Math.max(0, Math.min(viewportHeight, current.y + Math.sin(angle) * distance));

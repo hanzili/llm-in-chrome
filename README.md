@@ -1,95 +1,184 @@
-# llm in chrome
+# Job Apply Extension
 
-open-source claude in chrome that works with any llm.
+A Chrome extension that provides Claude-powered browser automation, extracted and documented from Claude in Chrome for full behavioral compatibility.
 
-## what is this
+## Features
 
-you know claude in chrome? this is basically that but open source and llm-agnostic. tell it what to do in plain english and it navigates websites, fills forms, extracts data, handles multi-step workflows, whatever you need.
+- **Browser Automation**: Click, type, scroll, drag, and navigate web pages
+- **Screenshots**: Capture and analyze page content with automatic DPR scaling
+- **Accessibility Tree**: Read page structure for intelligent element interaction
+- **Tab Management**: Create, close, and switch between tabs
+- **Form Handling**: Fill forms and upload files
+- **Console/Network Monitoring**: Track page logs and network requests
+- **Multi-Provider Support**: Works with Anthropic, OpenAI, Google, and OpenRouter
 
-runs locally on your machine. you choose which model to use.
+## Installation
 
-## demo
+### Prerequisites
 
-[![demo video](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
+- Google Chrome (version 120+)
+- Node.js 18+ (for development)
 
-shows the agent applying to jobs, unsubscribing from emails in gmail, and completing the deckathon dropout challenge (captchas and anti-bot protections).
+### Load the Extension
 
-## how it works
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/your-repo/job-apply-extension.git
+   cd job-apply-extension
+   ```
 
-![architecture](docs/architecture-diagram.png)
+2. Open Chrome and navigate to `chrome://extensions`
 
-the extension gives your llm a set of tools to interact with the browser:
+3. Enable "Developer mode" (toggle in top-right corner)
 
-**computer** - take screenshots, click elements, type text, scroll
+4. Click "Load unpacked" and select the extension directory
 
-**navigate** - control url navigation
+5. The extension icon should appear in your toolbar
 
-**read_page** - extract page structure via accessibility tree
+### Configuration
 
-**javascript_tool** - execute javascript in page context
+1. Click the extension icon and open Settings
+2. Enter your API key for your preferred provider:
+   - **Anthropic**: Get key from [console.anthropic.com](https://console.anthropic.com)
+   - **OpenAI**: Get key from [platform.openai.com](https://platform.openai.com)
+   - **Google**: Get key from [aistudio.google.com](https://aistudio.google.com)
+   - **OpenRouter**: Get key from [openrouter.ai](https://openrouter.ai)
 
-**solve_captcha** - automated captcha solving
+## Usage
 
-**tabs_context** - manage multiple tabs
+1. Navigate to any web page
+2. Click the extension icon to open the side panel
+3. Describe what you want to accomplish
+4. Claude will use the available tools to complete your task
 
-plus it has domain knowledge. knows google docs is canvas-based so it should use screenshots. github works better with accessibility tree. linkedin needs specific patterns to avoid detection.
+### Available Tools
 
-you can add your own domain knowledge through settings.
+| Tool | Description |
+|------|-------------|
+| `computer` | Mouse/keyboard actions (click, type, scroll, etc.) |
+| `navigate` | Go to URLs, back/forward navigation |
+| `tabs_context` | List available tabs |
+| `tabs_create` | Open new tabs |
+| `tabs_close` | Close tabs |
+| `read_page` | Get accessibility tree representation |
+| `get_page_text` | Extract text content from pages |
+| `form_input` | Fill form fields |
+| `file_upload` | Upload files to file inputs |
+| `javascript_tool` | Execute JavaScript on pages |
+| `read_console_messages` | Get browser console logs |
+| `read_network_requests` | Get network request history |
 
-## supported models
+## Architecture
 
-works with any openai-compatible api.
-
-**anthropic** - opus 4.5, opus 4, sonnet 4, haiku 4.5
-
-**openai** - gpt-5, gpt-5 mini, gpt-4.1, gpt-4o, o3, o4-mini
-
-**google** - gemini 3 pro, gemini 2.5 flash, gemini 2.5 pro
-
-**openrouter** - access to all major models through one api
-
-**custom** - any openai-compatible endpoint
-
-## installation
-
-```bash
-git clone https://github.com/hanzili/llm-in-chrome.git
+```
+src/
+├── background/
+│   ├── service-worker.js      # Main orchestration, agent loop
+│   ├── modules/
+│   │   ├── cdp-helper.js      # Chrome DevTools Protocol (copied from Claude in Chrome's `te` class)
+│   │   ├── key-definitions.js # Key codes (copied from Claude in Chrome's `ee` constant)
+│   │   ├── mac-commands.js    # Mac commands (copied from Claude in Chrome's `Z` constant)
+│   │   ├── screenshot-context.js # DPR coordinate scaling
+│   │   ├── api.js             # LLM API calls
+│   │   └── providers/         # Multi-provider support (Anthropic, OpenAI, Google, OpenRouter)
+│   └── tool-handlers/
+│       ├── computer-tool-claude.js   # Copied from Claude in Chrome's `ie` constant
+│       ├── navigation-tool-claude.js # Copied from Claude in Chrome's `Y` constant
+│       ├── form-tool-claude.js       # Copied from Claude in Chrome's `de` constant
+│       ├── read-page-tool-claude.js  # Copied from Claude in Chrome's `le` constant
+│       ├── utility-tools-claude.js   # find (`pe`), get_page_text (`he`), javascript_tool (`De`)
+│       ├── tabs-tool.js       # Our implementation
+│       ├── monitoring-tool.js # Our implementation
+│       └── agent-tool.js      # Our implementation
+├── content/
+│   ├── content-script.js      # Injected into pages
+│   └── accessibility-tree.js  # A11y tree generation (uses __claudeElementMap naming)
+├── sidepanel/
+│   ├── sidepanel.html         # Side panel UI
+│   └── sidepanel.js           # Side panel logic
+└── tools/
+    └── definitions.js         # Tool schemas for Claude
 ```
 
-1. open chrome://extensions/
-2. enable developer mode
-3. click load unpacked
-4. select the llm-in-chrome folder
-5. click the extension icon, go to settings
-6. choose your llm provider and add api key
+## Development
 
-## why domain knowledge matters
+### Running Tests
 
-different sites need different approaches.
+```bash
+# Unit tests
+node src/background/tool-handlers/computer-tool.test.js
 
-**vision-first** - google docs, figma, canva (canvas-based uis)
+# Differential tests (compares behavior with Claude in Chrome)
+node tests/differential/run-differential-tests.js
+```
 
-**accessibility tree** - github, gmail (structured content)
+### Key Files
 
-**javascript injection** - sites with dynamic content or anti-bot measures
+| File | Purpose |
+|------|---------|
+| `src/background/modules/cdp-helper.js` | Core browser automation (copied from Claude in Chrome's `te` class) |
+| `src/background/tool-handlers/computer-tool-claude.js` | Computer tool (copied from Claude in Chrome's `ie` constant) |
+| `src/content/accessibility-tree.js` | Accessibility tree generation (uses `__claudeElementMap`) |
+| `docs/CLAUDE_IN_CHROME_ARCHITECTURE.md` | Maps obfuscated names to real purposes |
 
-without domain knowledge the agent uses the wrong tool and fails. with it, works reliably.
+### Code Extraction from Claude in Chrome
 
-you can customize or add new domain strategies in settings.
+This extension's core automation code is **copied directly** from Claude in Chrome to ensure behavioral equivalence.
 
-## use cases
+#### Tool Handlers (Copied)
 
-automate boring web stuff. fill forms, extract data, test workflows, manage emails, apply to jobs, research, accessibility testing.
+| Claude in Chrome | This Extension | File |
+|-----------------|----------------|------|
+| `ie` (computer) | `handleComputer` | `tool-handlers/computer-tool-claude.js` |
+| `Y` (navigate) | `handleNavigate` | `tool-handlers/navigation-tool-claude.js` |
+| `de` (form_input) | `handleFormInput` | `tool-handlers/form-tool-claude.js` |
+| `le` (read_page) | `handleReadPage` | `tool-handlers/read-page-tool-claude.js` |
+| `pe` (find) | `handleFind` | `tool-handlers/utility-tools-claude.js` |
+| `he` (get_page_text) | `handleGetPageText` | `tool-handlers/utility-tools-claude.js` |
+| `De` (javascript_tool) | `handleJavaScriptTool` | `tool-handlers/utility-tools-claude.js` |
 
-privacy first. runs locally, only sends requests to your chosen llm provider. no tracking, no data collection.
+#### Core Infrastructure (Copied)
 
+| Claude in Chrome | This Extension | Purpose |
+|-----------------|----------------|---------|
+| `te` class | `CDPHelper` | CDP command handling |
+| `re` instance | `cdpHelper` | Singleton instance |
+| `oe` function | `scaleCoordinates` | DPR coordinate scaling |
+| `ee` constant | `KEY_DEFINITIONS` | Keyboard key codes |
+| `Z` constant | `MAC_COMMANDS` | macOS keyboard commands |
+| `Q` class | `ScreenshotContextManager` | Screenshot context storage |
 
-## what's next
+#### API Headers
 
-**more user control** - right now domain skills are hardcoded. want to let people customize system prompts, inject custom scripts, and integrate chrome devtools for more device-side control.
+Claude in Chrome uses `betas: ["oauth-2025-04-20"]` for OAuth authentication. No special "computer-use" beta header is required - the computer use feature is generally available.
 
-**mcp integration** - could work both ways. as a client it uses any mcp tool to help with tasks. as a server other clients just send it a task and it handles everything autonomously instead of the client orchestrating each step. already been experimenting with this idea in [comet-mcp](https://github.com/hanzili/comet-mcp).
+## Documentation
 
-**better stealth** - cdp gets detected by some sites. thinking about anti-detection browsers in docker with os-level access to look more like a real user.
+- [Architecture](docs/CLAUDE_IN_CHROME_ARCHITECTURE.md) - Detailed mapping of Claude in Chrome internals
+- [Extraction Plan](docs/EXTRACTION_PLAN.md) - How code was extracted and organized
+- [Provider Architecture](docs/PROVIDER_ARCHITECTURE.md) - Multi-provider support design
 
-**more domain knowledge** - expand built-in strategies for popular sites. 
+## Behavioral Equivalence
+
+The goal is **100% behavioral equivalence** with Claude in Chrome. This is verified through:
+
+1. **Differential Testing**: Same inputs → same CDP commands → same outputs
+2. **Line-by-line extraction**: Code logic is preserved exactly, only variable names change
+3. **Timing preservation**: All delays match the original (50ms, 100ms, 12ms, etc.)
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make changes (preserve behavioral equivalence!)
+4. Run differential tests: `node tests/differential/run-differential-tests.js`
+5. Submit a pull request
+
+## License
+
+MIT License - see LICENSE file for details.
+
+## Acknowledgments
+
+- Based on behavioral analysis of [Claude in Chrome](https://chrome.google.com/webstore/detail/claude/...) by Anthropic
+- Uses the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) for browser automation

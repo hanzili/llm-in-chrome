@@ -381,6 +381,8 @@ export const TOOL_DEFINITIONS = [
       },
       required: ['tabId'],
     },
+    // Domain-specific tool: only show on matching domains
+    _domains: ['deckathon-concordia.com'],
   },
 
   {
@@ -403,69 +405,6 @@ export const TOOL_DEFINITIONS = [
         },
       },
       required: ['width', 'height', 'tabId'],
-    },
-  },
-
-  {
-    name: 'gif_creator',
-    description: `Manage GIF recording and export for browser automation sessions. Control when to start/stop recording browser actions (clicks, scrolls, navigation), then export as an animated GIF with visual overlays (click indicators, action labels, progress bar, watermark). All operations are scoped to the tab's group. When starting recording, take a screenshot immediately after to capture the initial state as the first frame. When stopping recording, take a screenshot immediately before to capture the final state as the last frame. For export, either provide 'coordinate' to drag/drop upload to a page element, or set 'download: true' to download the GIF.`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['start_recording', 'stop_recording', 'export', 'clear'],
-          description: "Action to perform: 'start_recording' (begin capturing), 'stop_recording' (stop capturing but keep frames), 'export' (generate and export GIF), 'clear' (discard frames)",
-        },
-        tabId: {
-          type: 'number',
-          description: 'Tab ID to identify which tab group this operation applies to',
-        },
-        coordinate: {
-          type: 'array',
-          items: { type: 'number' },
-          description: "Viewport coordinates [x, y] for drag & drop upload. Required for 'export' action unless 'download' is true.",
-        },
-        download: {
-          type: 'boolean',
-          description: "If true, download the GIF instead of drag/drop upload. For 'export' action only.",
-        },
-        filename: {
-          type: 'string',
-          description: "Optional filename for exported GIF (default: 'recording-[timestamp].gif'). For 'export' action only.",
-        },
-        options: {
-          type: 'object',
-          description: "Optional GIF enhancement options for 'export' action.",
-          properties: {
-            showClickIndicators: {
-              type: 'boolean',
-              description: 'Show teal circles at click locations (default: true)',
-            },
-            showDragPaths: {
-              type: 'boolean',
-              description: 'Show red arrows for drag actions (default: true)',
-            },
-            showActionLabels: {
-              type: 'boolean',
-              description: 'Show black labels describing actions (default: true)',
-            },
-            showProgressBar: {
-              type: 'boolean',
-              description: 'Show teal progress bar at bottom (default: true)',
-            },
-            showWatermark: {
-              type: 'boolean',
-              description: 'Show logo watermark (default: true)',
-            },
-            quality: {
-              type: 'number',
-              description: 'GIF compression quality, 1-30 (lower = better quality, slower encoding). Default: 10',
-            },
-          },
-        },
-      },
-      required: ['action', 'tabId'],
     },
   },
 
@@ -542,4 +481,40 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
-export default TOOL_DEFINITIONS;
+/**
+ * Get tools filtered by URL - domain-specific tools are only included on matching domains
+ * @param {string} url - Current page URL
+ * @returns {Array} Filtered tool definitions (without internal _domains property)
+ */
+export function getToolsForUrl(url) {
+  let hostname = '';
+  try {
+    if (url) {
+      hostname = new URL(url).hostname.toLowerCase();
+    }
+  } catch {
+    // Invalid URL, show all non-domain-specific tools
+  }
+
+  return TOOL_DEFINITIONS
+    .filter(tool => {
+      // If tool has no domain restriction, always include
+      if (!tool._domains) return true;
+
+      // If no URL provided, exclude domain-specific tools
+      if (!hostname) return false;
+
+      // Check if hostname matches any of the tool's domains
+      return tool._domains.some(domain =>
+        hostname === domain || hostname.endsWith('.' + domain)
+      );
+    })
+    .map(tool => {
+      // Remove internal _domains property before sending to API
+      if (tool._domains) {
+        const { _domains, ...cleanTool } = tool;
+        return cleanTool;
+      }
+      return tool;
+    });
+}

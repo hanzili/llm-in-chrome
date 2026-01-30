@@ -1,11 +1,13 @@
 /**
- * LLM API communication module.
+ * LLM API communication module (Refactored with Provider Pattern)
  * Handles API calls, streaming responses, and configuration.
  */
 
-import { TOOL_DEFINITIONS } from '../../tools/definitions.js';
+import { TOOL_DEFINITIONS, getToolsForUrl } from '../../tools/definitions.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import { DOMAIN_SKILLS } from './domain-skills.js';
+import { createProvider } from './providers/provider-factory.js';
+import { getAccessToken } from './oauth-manager.js';
 
 // Configuration (loaded from storage)
 let config = {
@@ -19,13 +21,19 @@ let config = {
 // Abort controller for cancellation
 let abortController = null;
 
+// API call counter for debugging
+let apiCallCounter = 0;
+
+// Native host port for OAuth proxy (reused across API calls)
+let nativeHostPort = null;
+
 /**
  * Load configuration from storage
  */
 export async function loadConfig() {
   const stored = await chrome.storage.local.get([
     'apiBaseUrl', 'apiKey', 'model', 'maxSteps', 'maxTokens',
-    'providerKeys', 'customModels', 'currentModelIndex', 'userSkills'
+    'providerKeys', 'customModels', 'currentModelIndex', 'userSkills', 'authMethod'
   ]);
   config = { ...config, ...stored };
 
@@ -51,19 +59,36 @@ export function setConfig(newConfig) {
 }
 
 /**
- * Get API headers
+ * Get API headers based on the provider endpoint and auth method
+ * Supports both OAuth tokens and API keys
  */
-export function getApiHeaders() {
-  const headers = {
-    'Content-Type': 'application/json',
-    'anthropic-version': '2023-06-01',
-    'anthropic-beta': 'computer-use-2025-01-24',
-  };
-  if (config.apiKey) {
-    headers['x-api-key'] = config.apiKey;
-    headers['Authorization'] = `Bearer ${config.apiKey}`;
+export async function getApiHeaders() {
+  // Create provider to get base headers (Anthropic-specific headers, etc.)
+  const provider = createProvider(config.apiBaseUrl || '', config);
+  const providerHeaders = await provider.getHeaders();
+
+  // Check if using OAuth authentication
+  if (config.authMethod === 'oauth') {
+    const accessToken = await getAccessToken();
+
+    if (accessToken) {
+      // Use OAuth Bearer token instead of x-api-key
+      // Remove x-api-key if present and add Authorization header
+      const { 'x-api-key': _, ...headersWithoutApiKey } = providerHeaders;
+
+      return {
+        ...headersWithoutApiKey,
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+      };
+    }
+
+    // OAuth configured but no token - fall back to API key
+    console.warn('OAuth configured but no token available, falling back to API key');
   }
-  return headers;
+
+  // Use API key (provider-based)
+  return providerHeaders;
 }
 
 /**
@@ -92,13 +117,28 @@ export function abortRequest() {
 }
 
 /**
+ * Reset API call counter (called at start of each task)
+ */
+export function resetApiCallCounter() {
+  apiCallCounter = 0;
+}
+
+/**
+ * Get current API call count
+ */
+export function getApiCallCount() {
+  return apiCallCounter;
+}
+
+/**
  * Simple LLM API call (for quick tasks like summarization)
  */
 export async function callLLMSimple(prompt, maxTokens = 800) {
   await loadConfig();
+  const headers = await getApiHeaders();
   const response = await fetch(config.apiBaseUrl, {
     method: 'POST',
-    headers: getApiHeaders(),
+    headers: headers,
     body: JSON.stringify({
       model: 'claude-3-5-haiku-20241022',
       max_tokens: maxTokens,
@@ -111,160 +151,240 @@ export async function callLLMSimple(prompt, maxTokens = 800) {
 }
 
 /**
- * Add cache_control to the last assistant message for conversation caching.
+ * Get or create persistent native host connection for OAuth proxy
+ * @private
  */
-function addConversationCaching(messages) {
-  if (!messages || messages.length === 0) return messages;
+function getNativeHostPort() {
+  if (!nativeHostPort || !nativeHostPort.name) {
+    console.log('[API] Creating new native host connection for OAuth proxy');
+    nativeHostPort = chrome.runtime.connectNative('com.llm_in_chrome.oauth_host');
 
-  // Deep clone to avoid mutating original
-  const cachedMessages = JSON.parse(JSON.stringify(messages));
-
-  // Find last assistant message
-  for (let i = cachedMessages.length - 1; i >= 0; i--) {
-    if (cachedMessages[i].role === 'assistant') {
-      const content = cachedMessages[i].content;
-      if (Array.isArray(content) && content.length > 0) {
-        // Add cache_control to the last content block
-        content[content.length - 1].cache_control = { type: 'ephemeral' };
+    // Listen for token refresh events
+    nativeHostPort.onMessage.addListener(async (message) => {
+      if (message.type === 'tokens_refreshed') {
+        console.log('[API] OAuth tokens were refreshed by native host');
+        // Update extension storage with new tokens
+        await chrome.storage.local.set({
+          oauthAccessToken: message.credentials.accessToken,
+          oauthRefreshToken: message.credentials.refreshToken,
+          oauthExpiresAt: message.credentials.expiresAt
+        });
+        console.log('[API] Extension storage updated with refreshed tokens');
       }
-      break;
-    }
+    });
+
+    nativeHostPort.onDisconnect.addListener(() => {
+      console.log('[API] Native host disconnected');
+      nativeHostPort = null;
+    });
   }
 
-  return cachedMessages;
+  return nativeHostPort;
+}
+
+/**
+ * Make API call through native messaging proxy (for OAuth)
+ * @private
+ */
+async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
+  const provider = createProvider(config.apiBaseUrl || '', config);
+  const useStreaming = onTextChunk !== null;
+  const systemPrompt = buildSystemPrompt();
+
+  // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
+  const tools = currentUrl ? getToolsForUrl(currentUrl) : TOOL_DEFINITIONS;
+
+  // Build request body
+  const requestBody = provider.buildRequestBody(messages, systemPrompt, tools, useStreaming);
+  const apiUrl = provider.buildUrl(useStreaming);
+  const requestBodyStr = JSON.stringify(requestBody);
+
+  apiCallCounter++;
+  const callNumber = apiCallCounter;
+  const startTime = Date.now();
+
+  return new Promise((resolve, reject) => {
+    const port = getNativeHostPort();
+
+    // Create unique listener for this API call
+    const messageListener = async (message) => {
+      if (message.type === 'api_response') {
+        port.onMessage.removeListener(messageListener);
+
+        if (message.status !== 200) {
+          const errorMessage = parseErrorResponse(message.body, message.status);
+          reject(new Error(errorMessage));
+          return;
+        }
+
+        try {
+          const result = JSON.parse(message.body);
+          const duration = Date.now() - startTime;
+
+          await log('API', `#${callNumber} ${config.model} → ${result.stop_reason}`, {
+            model: config.model,
+            messages: messages.length,
+            stopReason: result.stop_reason,
+            tokens: result.usage,
+            duration: `${duration}ms`,
+          });
+
+          resolve(result);
+        } catch (err) {
+          reject(new Error(`Failed to parse API response: ${err.message}`));
+        }
+      } else if (message.type === 'api_error') {
+        port.onMessage.removeListener(messageListener);
+        reject(new Error(message.error));
+      }
+    };
+
+    port.onMessage.addListener(messageListener);
+
+    // Send request to native host
+    port.postMessage({
+      type: 'proxy_api_call',
+      data: {
+        url: apiUrl,
+        method: 'POST',
+        headers: {}, // Native host will add auth headers
+        body: requestBodyStr
+      }
+    });
+  });
 }
 
 /**
  * Main LLM API call with tools and streaming support
+ * @param {Array} messages - Conversation messages
+ * @param {Function|null} onTextChunk - Callback for streaming text chunks
+ * @param {Function} log - Logging function
+ * @param {string|null} currentUrl - Current tab URL (used to filter domain-specific tools)
  */
-export async function callLLM(messages, onTextChunk = null, log = () => {}) {
+export async function callLLM(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
   await loadConfig();
-  await log('API', `Calling API (${config.model})`, { messageCount: messages.length });
 
+  // If using OAuth, route through native messaging proxy
+  if (config.authMethod === 'oauth') {
+    return await callLLMThroughProxy(messages, null, log, currentUrl);
+  }
+
+  // Create provider instance
+  const provider = createProvider(config.apiBaseUrl || '', config);
   const useStreaming = onTextChunk !== null;
   const signal = abortController?.signal;
+  const systemPrompt = buildSystemPrompt();
 
-  // Add conversation caching to messages
-  const cachedMessages = addConversationCaching(messages);
+  // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
+  const tools = currentUrl ? getToolsForUrl(currentUrl) : TOOL_DEFINITIONS;
 
-  const response = await fetch(config.apiBaseUrl, {
-    method: 'POST',
-    headers: getApiHeaders(),
-    body: JSON.stringify({
+  // Build provider-specific request body and URL
+  const requestBody = provider.buildRequestBody(messages, systemPrompt, tools, useStreaming);
+  const apiUrl = provider.buildUrl(useStreaming);
+
+  // Add timeout to prevent hanging requests (2 minutes for API calls)
+  const timeoutMs = 120000;
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+
+  // Combine user abort signal with timeout
+  const combinedSignal = signal || timeoutController.signal;
+
+  try {
+    apiCallCounter++;
+    const callNumber = apiCallCounter;
+    const startTime = Date.now();
+
+    const requestBodyStr = JSON.stringify(requestBody);
+
+    const headers = await getApiHeaders();
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: headers,
+      body: requestBodyStr,
+      signal: combinedSignal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      const errorMessage = parseErrorResponse(errorText, response.status);
+      throw new Error(errorMessage);
+    }
+
+    // Handle response based on streaming mode
+    let result;
+    if (useStreaming) {
+      result = await provider.handleStreaming(response, onTextChunk, log);
+    } else {
+      const jsonResponse = await response.json();
+      result = provider.normalizeResponse(jsonResponse);
+    }
+
+    const duration = Date.now() - startTime;
+    await log('API', `#${callNumber} ${config.model} → ${result.stop_reason}`, {
       model: config.model,
-      max_tokens: config.maxTokens || 10000,
-      system: buildSystemPrompt(),
-      tools: TOOL_DEFINITIONS,
-      messages: cachedMessages,
-      stream: useStreaming,
-    }),
-    signal,
-  });
+      messages: messages.length,
+      stopReason: result.stop_reason,
+      tokens: result.usage,
+      duration: `${duration}ms`,
+    });
 
-  if (!response.ok) {
-    const error = await response.text();
-    throw new Error(`API error: ${response.status} ${error}`);
+    return result;
+  } catch (error) {
+    clearTimeout(timeoutId);
+
+    // Check if it was a timeout
+    if (error.name === 'AbortError') {
+      throw new Error(`API request timed out after ${timeoutMs / 1000} seconds. The model may be overloaded or unavailable.`);
+    }
+
+    throw error;
   }
-
-  if (useStreaming) {
-    return await handleStreamingResponse(response, onTextChunk, log);
-  }
-
-  const result = await response.json();
-  await log('API', 'Response received', { stopReason: result.stop_reason });
-  return result;
 }
 
 /**
- * Handle SSE streaming response
+ * Parse error response from API
+ * @private
  */
-async function handleStreamingResponse(response, onTextChunk, log) {
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
+function parseErrorResponse(errorText, status) {
+  let errorMessage = `API error: ${status}`;
 
-  let result = {
-    content: [],
-    stop_reason: null,
-  };
+  try {
+    const errorJson = JSON.parse(errorText);
+    console.error('[API] Error response:', errorJson);
 
-  let currentTextBlock = null;
-  let currentToolUse = null;
-  let buffer = '';
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line.startsWith('data: ')) continue;
-      const data = line.slice(6);
-      if (data === '[DONE]') continue;
-
-      try {
-        const event = JSON.parse(data);
-
-        switch (event.type) {
-          case 'content_block_start':
-            if (event.content_block.type === 'text') {
-              currentTextBlock = { type: 'text', text: '' };
-            } else if (event.content_block.type === 'tool_use') {
-              currentToolUse = {
-                type: 'tool_use',
-                id: event.content_block.id,
-                name: event.content_block.name,
-                input: {},
-              };
-            }
-            break;
-
-          case 'content_block_delta':
-            if (event.delta.type === 'text_delta' && currentTextBlock) {
-              currentTextBlock.text += event.delta.text;
-              if (onTextChunk) onTextChunk(event.delta.text);
-            } else if (event.delta.type === 'input_json_delta' && currentToolUse) {
-              currentToolUse._inputJson = (currentToolUse._inputJson || '') + event.delta.partial_json;
-            }
-            break;
-
-          case 'content_block_stop':
-            if (currentTextBlock) {
-              result.content.push(currentTextBlock);
-              currentTextBlock = null;
-            } else if (currentToolUse) {
-              let parsedInput = {};
-              if (currentToolUse._inputJson) {
-                try {
-                  parsedInput = JSON.parse(currentToolUse._inputJson);
-                } catch (e) {
-                  parsedInput = {};
-                }
-              }
-              result.content.push({
-                type: 'tool_use',
-                id: currentToolUse.id,
-                name: currentToolUse.name,
-                input: parsedInput,
-              });
-              currentToolUse = null;
-            }
-            break;
-
-          case 'message_delta':
-            if (event.delta.stop_reason) {
-              result.stop_reason = event.delta.stop_reason;
-            }
-            break;
-        }
-      } catch (e) {
-        // Ignore JSON parse errors for malformed events
+    // OpenAI/OpenRouter format
+    if (errorJson.error?.message) {
+      errorMessage += ` - ${errorJson.error.message}`;
+      if (errorJson.error.code) {
+        errorMessage += ` (${errorJson.error.code})`;
+      }
+      // Include metadata if available (OpenRouter specific)
+      if (errorJson.error?.metadata) {
+        errorMessage += ` [${JSON.stringify(errorJson.error.metadata)}]`;
       }
     }
+    // Anthropic format
+    else if (errorJson.error?.type) {
+      errorMessage += ` - ${errorJson.error.type}: ${errorJson.error.message || 'Unknown error'}`;
+    }
+    // Google format or any other error object
+    else if (errorJson.error) {
+      errorMessage += ` - ${JSON.stringify(errorJson.error)}`;
+    }
+    // Direct message at top level (some providers)
+    else if (errorJson.message) {
+      errorMessage += ` - ${errorJson.message}`;
+    }
+    // Fallback: dump entire response
+    else {
+      errorMessage += ` - ${errorText.substring(0, 500)}`;
+    }
+  } catch {
+    errorMessage += ` - ${errorText.substring(0, 500)}`;
   }
 
-  await log('API', 'Streaming response complete', { stopReason: result.stop_reason });
-  return result;
+  return errorMessage;
 }

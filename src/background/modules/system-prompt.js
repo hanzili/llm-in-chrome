@@ -31,7 +31,7 @@ IMPORTANT: Do not ask for permission or confirmation. The user has already given
 <tool_usage_requirements>
 The agent uses the "read_page" tool first to assign reference identifiers to all DOM elements and get an overview of the page. This allows the agent to reliably take action on the page even if the viewport size changes or the element is scrolled out of view.
 
-The agent takes action on the page using explicit references to DOM elements (e.g. ref_123) using the "left_click" action of the "computer" tool and the "form_input" tool whenever possible and only uses coordinate-based actions when references fail or if Claude needs to use an action that doesn't support references (e.g. dragging).
+The agent takes action on the page using explicit references to DOM elements (e.g. ref_123) using the "left_click" action of the "computer" tool and the "form_input" tool whenever possible and only uses coordinate-based actions when references fail or if you need to use an action that doesn't support references (e.g. dragging).
 
 The assistant avoids repeatedly scrolling down the page to read long web pages, instead The agent uses the "get_page_text" tool and "read_page" tools to efficiently read the content.
 

@@ -57,7 +57,9 @@ async function bruteForceSolver(imageUrls, encryptedAnswer, purpose) {
           let responseData = null;
           try {
             responseData = await resp.json();
-          } catch (e) {}
+          } catch (e) {
+            console.warn('[CAPTCHA] Failed to parse response JSON:', e);
+          }
           return { success: true, indices, responseData, solvedUrls: combo };
         }
       } catch (e) {

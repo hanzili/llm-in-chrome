@@ -143,9 +143,10 @@ function handleFormInput(payload, sendResponse) {
           output: `Selected option "${valueStr}" in dropdown (previous: "${previousValue}")`
         });
       } else {
+        const optionsList = options.map(o => '"' + o.text + '" (value: "' + o.value + '")').join(', ');
         sendResponse({
           success: false,
-          error: `Option "${valueStr}" not found. Available options: ${options.map(o => `"${o.text}" (value: "${o.value}")`).join(', ')}`
+          error: 'Option "' + valueStr + '" not found. Available options: ' + optionsList
         });
       }
       return;
@@ -171,15 +172,15 @@ function handleFormInput(payload, sendResponse) {
 
     // Handle RADIO inputs
     if (element instanceof HTMLInputElement && element.type === 'radio') {
-      const previousValue = element.checked;
       const groupName = element.name;
       element.checked = true;
       element.focus();
       element.dispatchEvent(new Event('change', { bubbles: true }));
       element.dispatchEvent(new Event('input', { bubbles: true }));
+      const groupText = groupName ? ' in group "' + groupName + '"' : '';
       sendResponse({
         success: true,
-        output: `Radio button selected${groupName ? ` in group "${groupName}"` : ''}`
+        output: 'Radio button selected' + groupText
       });
       return;
     }
@@ -201,7 +202,6 @@ function handleFormInput(payload, sendResponse) {
 
     // Handle RANGE inputs
     if (element instanceof HTMLInputElement && element.type === 'range') {
-      const previousValue = element.value;
       const numValue = Number(value);
       if (isNaN(numValue)) {
         sendResponse({ success: false, error: 'Range input requires a numeric value' });
@@ -557,9 +557,10 @@ function handleUploadImage(payload, sendResponse) {
  */
 function handleFindAndScroll(payload, sendResponse) {
   try {
-    const { x, y, deltaX, deltaY, direction, amount } = payload;
+    const { x, y, deltaX, deltaY, direction: _direction, amount: _amount } = payload;
 
     // Helper to check if element is scrollable
+    // eslint-disable-next-line no-inner-declarations
     function isScrollable(element) {
       const style = window.getComputedStyle(element);
       const overflowY = style.overflowY;

@@ -18,10 +18,10 @@ const PROVIDERS = {
     name: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1/chat/completions',
     models: [
+      { id: 'gpt-4o', name: 'GPT-4o' },
       { id: 'gpt-5', name: 'GPT-5' },
       { id: 'gpt-5-mini', name: 'GPT-5 Mini' },
       { id: 'gpt-4.1', name: 'GPT-4.1' },
-      { id: 'gpt-4o', name: 'GPT-4o' },
       { id: 'o3', name: 'o3' },
       { id: 'o4-mini', name: 'o4-mini' },
     ],
@@ -30,7 +30,7 @@ const PROVIDERS = {
     name: 'Google',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/models',
     models: [
-      { id: 'gemini-3-pro', name: 'Gemini 3 Pro' },
+      { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)' },
       { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
       { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
     ],
@@ -39,19 +39,15 @@ const PROVIDERS = {
     name: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1/chat/completions',
     models: [
-      { id: 'anthropic/claude-sonnet-4', name: 'Claude Sonnet 4' },
-      { id: 'anthropic/claude-opus-4', name: 'Claude Opus 4' },
-      { id: 'openai/gpt-5', name: 'GPT-5' },
-      { id: 'openai/o3', name: 'o3' },
-      { id: 'google/gemini-3-pro', name: 'Gemini 3 Pro' },
-      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'qwen/qwen3-vl-235b-a22b-thinking', name: 'Qwen3 VL 235B (Reasoning)' },
+      { id: 'moonshotai/kimi-k2.5', name: 'Kimi K2.5 (Reasoning)' },
+      { id: 'mistralai/mistral-large-2512', name: 'Mistral Large 3' },
     ],
   },
 };
 
 // Elements
 const messagesEl = document.getElementById('messages');
-const emptyStateEl = document.getElementById('empty-state');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
 const modelSelector = document.getElementById('model-selector');
@@ -83,6 +79,9 @@ let completedSteps = []; // Array of { tool, input, result, description }
 let pendingStep = null; // Current executing step
 let stepsSection = null;
 let attachedImages = []; // Array of base64 data URLs
+
+// Session state - managed by UI
+let sessionTabGroupId = null; // Tab group for current session
 
 // Config state
 let providerKeys = {}; // { anthropic: 'sk-...', openai: 'sk-...', ... }
@@ -158,6 +157,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('skill-form-close').addEventListener('click', hideSkillForm);
   document.getElementById('skill-form-cancel').addEventListener('click', hideSkillForm);
 
+  // OAuth login/logout
+  document.getElementById('oauth-login-btn').addEventListener('click', handleOAuthLogin);
+  document.getElementById('oauth-logout-btn').addEventListener('click', handleOAuthLogout);
+  document.getElementById('import-cli-btn').addEventListener('click', handleImportCLI);
+
   // Ask before acting toggle
   askToggle.addEventListener('click', () => {
     askBeforeActing = !askBeforeActing;
@@ -217,6 +221,10 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'TASK_COMPLETE': handleTaskComplete(message.result); break;
     case 'TASK_ERROR': handleTaskError(message.error); break;
     case 'PLAN_APPROVAL_REQUIRED': showPlanApproval(message.plan); break;
+    case 'SESSION_GROUP_UPDATE':
+      // Service worker informs us of tab group changes
+      sessionTabGroupId = message.tabGroupId;
+      break;
   }
 });
 
@@ -232,27 +240,36 @@ async function loadConfig() {
   userSkills = config.userSkills || [];
   builtInSkills = config.builtInSkills || [];
 
-  buildAvailableModels();
+  await updateOAuthStatus();
+  await buildAvailableModels();
   updateModelDisplay();
   renderModelList();
-  updateProviderStatuses();
+  await updateProviderStatuses();
   renderCustomModelsList();
   renderSkillsList();
 }
 
-function buildAvailableModels() {
+async function buildAvailableModels() {
   availableModels = [];
+
+  // Check if OAuth is enabled
+  const oauthStatus = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
+  const hasOAuth = oauthStatus && oauthStatus.isOAuthEnabled && oauthStatus.isAuthenticated;
 
   // Add models from configured providers
   for (const [providerId, provider] of Object.entries(PROVIDERS)) {
-    if (providerKeys[providerId]) {
+    // For Anthropic: show models if OAuth is enabled OR if API key is configured
+    const isAnthropicWithOAuth = providerId === 'anthropic' && hasOAuth;
+    const hasApiKey = providerKeys[providerId];
+
+    if (isAnthropicWithOAuth || hasApiKey) {
       for (const model of provider.models) {
         availableModels.push({
           name: model.name,
           provider: providerId,
           modelId: model.id,
           baseUrl: provider.baseUrl,
-          apiKey: providerKeys[providerId],
+          apiKey: hasApiKey ? providerKeys[providerId] : null, // null means use OAuth
         });
       }
     }
@@ -353,7 +370,7 @@ function renderModelList() {
 // SETTINGS
 // ============================================
 
-function openSettings() {
+async function openSettings() {
   settingsModal.classList.remove('hidden');
   selectedProvider = null;
   document.getElementById('provider-config').style.display = 'none';
@@ -361,6 +378,7 @@ function openSettings() {
   renderCustomModelsList();
   renderSkillsList();
   hideSkillForm(); // Hide and reset skill form when opening
+  await updateOAuthStatus(); // Check OAuth login status
 }
 
 function closeSettings() {
@@ -380,10 +398,19 @@ function selectProvider(providerId) {
   apiKeyInput.focus();
 }
 
-function updateProviderStatuses() {
+async function updateProviderStatuses() {
+  // Check OAuth status
+  const oauthStatus = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
+  const hasOAuth = oauthStatus && oauthStatus.isOAuthEnabled && oauthStatus.isAuthenticated;
+
   for (const providerId of Object.keys(PROVIDERS)) {
     const statusEl = document.getElementById(`${providerId}-status`);
-    if (providerKeys[providerId]) {
+
+    // For Anthropic, show OAuth status
+    if (providerId === 'anthropic' && hasOAuth) {
+      statusEl.textContent = 'OAuth Active';
+      statusEl.classList.add('configured');
+    } else if (providerKeys[providerId]) {
       statusEl.textContent = 'Configured';
       statusEl.classList.add('configured');
     } else {
@@ -404,12 +431,184 @@ async function saveSettings() {
     }
   }
 
-  buildAvailableModels();
+  await buildAvailableModels();
   updateModelDisplay();
   renderModelList();
-  updateProviderStatuses();
+  await updateProviderStatuses();
   await saveConfig();
   closeSettings();
+}
+
+// OAuth handlers
+async function handleOAuthLogin() {
+  console.log('[Sidepanel] ===== OAuth Login Button Clicked =====');
+  const btn = document.getElementById('oauth-login-btn');
+  const statusEl = document.getElementById('oauth-status');
+
+  console.log('[Sidepanel] Disabling button and showing status...');
+  btn.disabled = true;
+  btn.textContent = 'Opening login...';
+  statusEl.style.display = 'block';
+  statusEl.textContent = 'Opening Claude login popup...';
+
+  try {
+    console.log('[Sidepanel] Sending START_OAUTH_LOGIN message to service worker...');
+    const response = await chrome.runtime.sendMessage({ type: 'START_OAUTH_LOGIN' });
+    console.log('[Sidepanel] Response received:', response);
+
+    if (response.success) {
+      console.log('[Sidepanel] ✓ OAuth login successful!');
+      statusEl.textContent = '✓ Successfully logged in with Claude!';
+      statusEl.style.color = '#4CAF50';
+      statusEl.style.display = 'block';
+
+      // Update UI to show logged in state
+      console.log('[Sidepanel] Updating UI to show logged in state...');
+      document.getElementById('oauth-btn-text').textContent = '✓ Logged in with OAuth';
+      document.getElementById('oauth-logout-btn').style.display = 'block';
+      btn.style.display = 'none';
+      document.getElementById('import-cli-btn').style.display = 'none';
+
+      // Rebuild models to show Anthropic models
+      await buildAvailableModels();
+      updateModelDisplay();
+      renderModelList();
+      await updateProviderStatuses();
+
+      console.log('[Sidepanel] ✓ Auth method saved');
+    } else {
+      console.error('[Sidepanel] ✗ OAuth login failed:', response.error);
+      throw new Error(response.error || 'OAuth login failed');
+    }
+  } catch (error) {
+    console.error('[Sidepanel] ✗ OAuth login error:', error);
+    console.error('[Sidepanel] Error message:', error.message);
+    console.error('[Sidepanel] Error stack:', error.stack);
+    statusEl.textContent = `✗ Login failed: ${error.message}`;
+    statusEl.style.color = '#ff6b6b';
+    btn.disabled = false;
+    btn.textContent = 'Login with Claude Account';
+  }
+}
+
+async function handleOAuthLogout() {
+  const logoutBtn = document.getElementById('oauth-logout-btn');
+  const loginBtn = document.getElementById('oauth-login-btn');
+  const importBtn = document.getElementById('import-cli-btn');
+  const statusEl = document.getElementById('oauth-status');
+
+  try {
+    // Send message to service worker to logout
+    await chrome.runtime.sendMessage({ type: 'OAUTH_LOGOUT' });
+
+    // Update UI
+    loginBtn.style.display = 'flex';
+    importBtn.style.display = 'flex';
+    document.getElementById('oauth-btn-text').textContent = 'Direct OAuth Login';
+    logoutBtn.style.display = 'none';
+    statusEl.textContent = 'Logged out';
+    statusEl.style.color = 'var(--text-secondary)';
+    statusEl.style.display = 'block';
+
+    // Rebuild models (remove Anthropic models if no API key)
+    await buildAvailableModels();
+    updateModelDisplay();
+    renderModelList();
+    await updateProviderStatuses();
+
+    setTimeout(() => {
+      statusEl.style.display = 'none';
+    }, 2000);
+  } catch (error) {
+    console.error('OAuth logout error:', error);
+    statusEl.textContent = `✗ Logout failed: ${error.message}`;
+    statusEl.style.color = '#ff6b6b';
+  }
+}
+
+async function handleImportCLI() {
+  console.log('[Sidepanel] ===== Import CLI Tokens Button Clicked =====');
+  const btn = document.getElementById('import-cli-btn');
+  const statusEl = document.getElementById('oauth-status');
+
+  console.log('[Sidepanel] Disabling button and showing status...');
+  btn.disabled = true;
+  btn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> <span>Importing...</span>';
+  statusEl.style.display = 'block';
+  statusEl.textContent = 'Reading Claude CLI credentials...';
+
+  try {
+    console.log('[Sidepanel] Sending IMPORT_CLI_CREDENTIALS message to service worker...');
+    const response = await chrome.runtime.sendMessage({ type: 'IMPORT_CLI_CREDENTIALS' });
+    console.log('[Sidepanel] Response received:', response);
+
+    if (response.success) {
+      console.log('[Sidepanel] ✓ CLI credentials import successful!');
+      statusEl.textContent = '✓ Successfully imported Claude CLI tokens!';
+      statusEl.style.color = '#4CAF50';
+
+      // Update UI to show logged in state
+      console.log('[Sidepanel] Updating UI to show logged in state...');
+      document.getElementById('oauth-btn-text').textContent = '✓ Using Claude CLI Tokens';
+      document.getElementById('oauth-logout-btn').style.display = 'block';
+      document.getElementById('oauth-login-btn').style.display = 'none';
+      btn.style.display = 'none';
+
+      // Rebuild models to show Anthropic models
+      await buildAvailableModels();
+      updateModelDisplay();
+      renderModelList();
+
+      console.log('[Sidepanel] ✓ UI updated');
+    } else {
+      console.error('[Sidepanel] ✗ CLI import failed:', response.error);
+      throw new Error(response.error || 'CLI credentials import failed');
+    }
+  } catch (error) {
+    console.error('[Sidepanel] ✗ CLI import error:', error);
+    console.error('[Sidepanel] Error message:', error.message);
+    statusEl.textContent = `✗ Import failed: ${error.message}`;
+    statusEl.style.color = '#ff6b6b';
+    btn.disabled = false;
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span>Import Claude CLI Tokens</span>';
+  }
+}
+
+async function updateOAuthStatus() {
+  // Check if user is authenticated with OAuth
+  const response = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
+  const { tokenSource } = await chrome.storage.local.get('tokenSource');
+
+  if (response && response.isOAuthEnabled && response.isAuthenticated) {
+    // Show logged in state
+    document.getElementById('oauth-login-btn').style.display = 'none';
+    document.getElementById('import-cli-btn').style.display = 'none';
+    document.getElementById('oauth-logout-btn').style.display = 'block';
+
+    const statusEl = document.getElementById('oauth-status');
+    statusEl.style.display = 'block';
+    statusEl.style.color = '#4CAF50';
+
+    // Show different text based on token source
+    if (tokenSource === 'claude_cli') {
+      document.getElementById('oauth-btn-text').textContent = '✓ Using Claude CLI Tokens';
+    } else {
+      document.getElementById('oauth-btn-text').textContent = '✓ Logged in with OAuth';
+    }
+
+    // Just show that it's active - no need to show countdown since it auto-refreshes
+    if (tokenSource === 'claude_cli') {
+      statusEl.textContent = '✓ Connected to Claude CLI (auto-refreshes)';
+    } else {
+      statusEl.textContent = '✓ Authenticated (auto-refreshes)';
+    }
+  } else {
+    // Show logged out state
+    document.getElementById('oauth-login-btn').style.display = 'flex';
+    document.getElementById('import-cli-btn').style.display = 'flex';
+    document.getElementById('oauth-logout-btn').style.display = 'none';
+    document.getElementById('oauth-status').style.display = 'none';
+  }
 }
 
 async function addCustomModel() {
@@ -431,7 +630,7 @@ async function addCustomModel() {
   document.getElementById('custom-model-id').value = '';
   document.getElementById('custom-api-key').value = '';
 
-  buildAvailableModels();
+  await buildAvailableModels();
   updateModelDisplay();
   renderModelList();
   renderCustomModelsList();
@@ -475,7 +674,7 @@ function renderCustomModelsList() {
       const modelName = customModels[index].name;
       if (confirm(`Delete "${modelName}"?`)) {
         customModels.splice(index, 1);
-        buildAvailableModels();
+        await buildAvailableModels();
         updateModelDisplay();
         renderModelList();
         renderCustomModelsList();
@@ -608,16 +807,6 @@ function hideSkillForm() {
   cancelSkillEdit();
 }
 
-function editSkill(index) {
-  editingSkillIndex = index;
-  const skill = userSkills[index];
-  document.getElementById('skill-domain').value = skill.domain;
-  document.getElementById('skill-content').value = skill.skill;
-  document.getElementById('skill-form-title').textContent = 'Edit Skill';
-  document.getElementById('add-skill-btn').textContent = 'Save Changes';
-  showSkillForm();
-}
-
 async function addOrUpdateSkill() {
   const domain = document.getElementById('skill-domain').value.trim().toLowerCase();
   const skill = document.getElementById('skill-content').value.trim();
@@ -693,7 +882,13 @@ async function sendMessage() {
   try {
     await chrome.runtime.sendMessage({
       type: 'START_TASK',
-      payload: { tabId: tab.id, task: text, askBeforeActing, images: imagesToSend },
+      payload: {
+        tabId: tab.id,
+        task: text,
+        askBeforeActing,
+        images: imagesToSend,
+        tabGroupId: sessionTabGroupId, // Send current tab group ID (or null)
+      },
     });
   } catch (error) {
     addErrorMessage(`Error: ${error.message}`);
@@ -1115,52 +1310,83 @@ function formatStepResult(result) {
 
 function addCompletedStep(toolName, input = null, result = null) {
   const description = getActionDescription(toolName, input);
-  completedSteps.push({ tool: toolName, input, result, description });
-  updateStepsSection();
+  const step = { tool: toolName, input, result, description };
+  completedSteps.push(step);
+
+  // Incremental update: just append the new step
+  appendStepElement(step);
+  updateStepCount();
 }
 
-function updateStepsSection() {
-  if (completedSteps.length === 0) return;
-
-  if (!stepsSection) {
-    stepsSection = document.createElement('div');
-    stepsSection.className = 'steps-section';
-    stepsSection.innerHTML = `
-      <div class="steps-toggle">
-        <div class="toggle-icon">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
-        </div>
-        <span class="toggle-text">${completedSteps.length} step${completedSteps.length !== 1 ? 's' : ''} completed</span>
-        <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+function createStepsSection() {
+  stepsSection = document.createElement('div');
+  stepsSection.className = 'steps-section';
+  stepsSection.innerHTML = `
+    <div class="steps-toggle">
+      <div class="toggle-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
       </div>
-      <div class="steps-list"></div>
-    `;
-    // Use event delegation - query elements fresh on each click
-    stepsSection.querySelector('.steps-toggle').addEventListener('click', (e) => {
-      const toggle = stepsSection.querySelector('.steps-toggle');
-      const list = stepsSection.querySelector('.steps-list');
-      toggle.classList.toggle('expanded');
-      list.classList.toggle('visible');
-    });
-    messagesEl.appendChild(stepsSection);
+      <span class="toggle-text">0 steps completed</span>
+      <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
+    <div class="steps-list"></div>
+  `;
+
+  // Toggle expand/collapse
+  stepsSection.querySelector('.steps-toggle').addEventListener('click', () => {
+    const toggle = stepsSection.querySelector('.steps-toggle');
+    const list = stepsSection.querySelector('.steps-list');
+    toggle.classList.toggle('expanded');
+    list.classList.toggle('visible');
+  });
+
+  messagesEl.appendChild(stepsSection);
+}
+
+function appendStepElement(step) {
+  // Create steps section if it doesn't exist
+  if (!stepsSection) {
+    createStepsSection();
   }
 
-  const stepCount = completedSteps.length;
-  stepsSection.querySelector('.toggle-text').textContent = `${stepCount} step${stepCount !== 1 ? 's' : ''} completed`;
-  stepsSection.querySelector('.steps-list').innerHTML = completedSteps.map(step => {
-    const resultText = formatStepResult(step.result);
-    return `
-      <div class="step-item">
-        <div class="step-icon success">${getToolIcon(step.tool)}</div>
-        <div class="step-content">
-          <div class="step-label">${escapeHtml(step.description)}</div>
-          ${resultText ? `<div class="step-result">${escapeHtml(resultText)}</div>` : ''}
-        </div>
-        <div class="step-status">✓</div>
-      </div>
-    `;
-  }).join('');
-  scrollToBottom();
+  const list = stepsSection.querySelector('.steps-list');
+  const stepEl = createStepElement(step);
+  list.appendChild(stepEl);
+
+  // Only auto-scroll if user is already near bottom
+  if (isScrolledToBottom()) {
+    scrollToBottom();
+  }
+}
+
+function createStepElement(step) {
+  const div = document.createElement('div');
+  div.className = 'step-item';
+
+  const resultText = formatStepResult(step.result);
+  div.innerHTML = `
+    <div class="step-icon success">${getToolIcon(step.tool)}</div>
+    <div class="step-content">
+      <div class="step-label">${escapeHtml(step.description)}</div>
+      ${resultText ? `<div class="step-result">${escapeHtml(resultText)}</div>` : ''}
+    </div>
+    <div class="step-status">✓</div>
+  `;
+
+  return div;
+}
+
+function updateStepCount() {
+  if (!stepsSection) return;
+
+  const toggle = stepsSection.querySelector('.toggle-text');
+  const count = completedSteps.length;
+  toggle.textContent = `${count} step${count !== 1 ? 's' : ''} completed`;
+}
+
+function isScrolledToBottom() {
+  const threshold = 50; // px from bottom
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < threshold;
 }
 
 function escapeHtml(text) {
@@ -1193,5 +1419,6 @@ function clearChat() {
   currentToolIndicator = null;
   isRunning = false;
   sendBtn.disabled = false;
+  sessionTabGroupId = null; // Reset tab group on new chat
   chrome.runtime.sendMessage({ type: 'CLEAR_CONVERSATION' }).catch(() => {});
 }

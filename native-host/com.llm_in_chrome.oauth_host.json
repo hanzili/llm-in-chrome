@@ -1,0 +1,9 @@
+{
+  "name": "com.llm_in_chrome.oauth_host",
+  "description": "OAuth local server for LLM in Chrome extension",
+  "path": "/PLACEHOLDER_PATH/oauth-server.js",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://PLACEHOLDER_EXTENSION_ID/"
+  ]
+}

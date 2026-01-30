@@ -14,7 +14,6 @@
   let staticIndicator = null;
   let isShowingGlow = false;
   let isShowingStatic = false;
-  let heartbeatInterval = null;
   let wasShowingGlow = false;
   let wasShowingStatic = false;
 

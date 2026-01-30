@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LLM in Chrome",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "LLM-agnostic browser automation assistant",
 
   "icons": {
@@ -19,7 +19,9 @@
     "tabs",
     "tabGroups",
     "sidePanel",
-    "downloads"
+    "downloads",
+    "identity",
+    "nativeMessaging"
   ],
 
   "host_permissions": [
@@ -48,7 +50,14 @@
     {
       "matches": ["<all_urls>"],
       "js": [
-        "src/content/accessibility-tree.js",
+        "src/content/accessibility-tree.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": [
         "src/content/content.js",
         "src/content/agent-visual-indicator.js"
       ],

@@ -6,7 +6,8 @@
  */
 
 // Global state for element tracking
-window.__elementMap || (window.__elementMap = {});
+// Element reference map for tool handlers
+window.__elementRefMap || (window.__elementRefMap = {});
 window.__refCounter || (window.__refCounter = 0);
 
 /**
@@ -197,11 +198,10 @@ function shouldInclude(element, options) {
   if ("interactive" === options.filter) {
     // Include semantic elements
     if (hasSemantic(element)) return true;
-    // Include images (important for CAPTCHA)
+    // Include images
     if (element.tagName.toLowerCase() === "img") return true;
     // Include elements with accessible names (text content)
-    if (getName(element).length > 0) return true;
-    return false;
+    return getName(element).length > 0;
   }
 
   // For 'all' filter, include semantic elements
@@ -233,6 +233,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
     /**
      * Recursively build tree
      */
+    // eslint-disable-next-line no-inner-declarations
     function buildTree(element, depth, options) {
       if (depth > treeDepth) return;
       if (!element || !element.tagName) return;
@@ -246,16 +247,16 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
         // Get or create ref ID
         var ref = null;
-        for (var id in window.__elementMap) {
-          if (window.__elementMap[id].deref &&
-              window.__elementMap[id].deref() === element) {
+        for (var id in window.__elementRefMap) {
+          if (window.__elementRefMap[id].deref &&
+              window.__elementRefMap[id].deref() === element) {
             ref = id;
             break;
           }
         }
         if (!ref) {
           ref = "ref_" + ++window.__refCounter;
-          window.__elementMap[ref] = new WeakRef(element);
+          window.__elementRefMap[ref] = new WeakRef(element);
         }
 
         // Build line: indent + role + name + ref + attributes
@@ -275,14 +276,6 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
           line += ' type="' + element.getAttribute("type") + '"';
         if (element.getAttribute("placeholder"))
           line += ' placeholder="' + element.getAttribute("placeholder") + '"';
-
-        // Add position info for images (helps agent understand visual layout for CAPTCHAs)
-        if ("img" === element.tagName.toLowerCase()) {
-          try {
-            var imgRect = element.getBoundingClientRect();
-            line += ' pos="(' + Math.round(imgRect.left) + ',' + Math.round(imgRect.top) + ')"';
-          } catch (e) {}
-        }
 
         output.push(line);
 
@@ -316,6 +309,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
     /**
      * Process iframes and add their content to the tree
      */
+    // eslint-disable-next-line no-inner-declarations
     function processIframes(baseDepth, frameOffsetX, frameOffsetY) {
       var iframes = document.querySelectorAll('iframe');
       for (var i = 0; i < iframes.length; i++) {
@@ -352,6 +346,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
     /**
      * Build tree for elements inside an iframe
      */
+    // eslint-disable-next-line no-inner-declarations
     function buildTreeInIframe(element, depth, options, doc) {
       if (depth > treeDepth) return;
       if (!element || !element.tagName) return;
@@ -364,9 +359,9 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
         // Get or create ref ID (use special prefix for iframe elements)
         var ref = null;
-        for (var id in window.__elementMap) {
-          if (window.__elementMap[id].deref &&
-              window.__elementMap[id].deref() === element) {
+        for (var id in window.__elementRefMap) {
+          if (window.__elementRefMap[id].deref &&
+              window.__elementRefMap[id].deref() === element) {
             ref = id;
             break;
           }
@@ -374,7 +369,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
         if (!ref) {
           ref = "ref_" + ++window.__refCounter;
           // Store element with iframe offset info
-          window.__elementMap[ref] = new WeakRef(element);
+          window.__elementRefMap[ref] = new WeakRef(element);
           window.__elementOffsets = window.__elementOffsets || {};
           window.__elementOffsets[ref] = {
             x: options.iframeOffsetX || 0,
@@ -429,7 +424,7 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
 
     // If refId provided, start from that element
     if (refId) {
-      var weakRef = window.__elementMap[refId];
+      var weakRef = window.__elementRefMap[refId];
       if (!weakRef) {
         return {
           error: "Element with ref_id '" + refId + "' not found. It may have been removed from the page. Use read_page without ref_id to get the current page state.",
@@ -454,10 +449,10 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
     }
 
     // Clean up dead references
-    for (var id in window.__elementMap) {
-      var ref = window.__elementMap[id];
+    for (var id in window.__elementRefMap) {
+      var ref = window.__elementRefMap[id];
       if (ref.deref && !ref.deref()) {
-        delete window.__elementMap[id];
+        delete window.__elementRefMap[id];
       }
     }
 
@@ -495,14 +490,14 @@ window.__generateAccessibilityTree = function(filter, maxDepth, maxChars, refId)
  * Get element by ref ID
  */
 window.__getElementByRef = function(refId) {
-  var weakRef = window.__elementMap[refId];
+  var weakRef = window.__elementRefMap[refId];
   if (weakRef && weakRef.deref) {
     var element = weakRef.deref();
     if (element && document.contains(element)) {
       return element;
     }
     // Element was garbage collected or removed
-    delete window.__elementMap[refId];
+    delete window.__elementRefMap[refId];
   }
   return null;
 };
@@ -543,7 +538,7 @@ window.__getElementRect = function(refId) {
  * Clear ref mappings (call when navigating to new page)
  */
 window.__clearRefMappings = function() {
-  window.__elementMap = {};
+  window.__elementRefMap = {};
   window.__elementOffsets = {};
   window.__refCounter = 0;
 };

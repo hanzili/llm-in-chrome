@@ -1,0 +1,41 @@
+// Timing delays (milliseconds)
+export const DELAYS = {
+  RETRY: 200,
+  SCREENSHOT_IDLE_MIN: 30,
+  SCREENSHOT_IDLE_MAX: 80,
+  CLICK_BEFORE: 20,
+  CLICK_AFTER: 100,
+  NEW_TAB_DETECTION: 300,
+  NAVIGATE_WAIT: 2000,
+  TYPE_CHAR_MIN: 30,
+  TYPE_CHAR_MAX: 80,
+};
+
+export const RETRIES = {
+  MAX_TAB_GROUP: 5,
+  MAX_SCREENSHOT: 3,
+};
+
+export const LIMITS = {
+  LOG_DATA_CHARS: 100000, // 100KB for detailed debugging (logs metadata for images, full text for reasoning)
+  LOG_ENTRIES: 200,
+  CLEAN_TURN_CONTENT: 2000,
+  PAGE_TEXT_CHARS: 50000,
+  CONSOLE_MESSAGES: 500,
+  NETWORK_REQUESTS: 1000,
+};
+
+export const VIEWPORT = {
+  DEFAULT_WIDTH: 1920,
+  DEFAULT_HEIGHT: 1080,
+};
+
+export const MOUSE = {
+  MIN_STEPS: 10,
+  STEPS_PER_PIXEL: 50,
+  DURATION_MIN: 200,
+  DURATION_MAX: 600,
+  JITTER_AMOUNT: 1,
+  IDLE_DISTANCE_MIN: 10,
+  IDLE_DISTANCE_MAX: 50,
+};

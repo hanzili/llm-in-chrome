@@ -1,0 +1,51 @@
+{
+  "env": {
+    "browser": true,
+    "es2021": true,
+    "webextensions": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:sonarjs/recommended"
+  ],
+  "plugins": ["sonarjs"],
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "module"
+  },
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-empty": ["error", { "allowEmptyCatch": false }],
+    "no-console": "off",
+    "no-unreachable": "error",
+    "no-constant-condition": "error",
+    "complexity": ["warn", { "max": 20 }],
+    "max-depth": ["warn", { "max": 4 }],
+    "max-lines-per-function": ["warn", { "max": 200, "skipBlankLines": true, "skipComments": true }],
+    "max-params": ["warn", { "max": 8 }],
+    "sonarjs/cognitive-complexity": ["warn", 20],
+    "sonarjs/no-duplicate-string": "off",
+    "sonarjs/no-identical-functions": "warn"
+  },
+  "overrides": [
+    {
+      "files": ["**/*.test.js", "**/tests/**/*.js"],
+      "env": {
+        "node": true
+      },
+      "globals": {
+        "getKeyCode": "readonly",
+        "requiresShift": "readonly",
+        "pressKey": "readonly",
+        "pressKeyChord": "readonly",
+        "cdpHelper": "writable"
+      },
+      "rules": {
+        "sonarjs/no-unused-collection": "off",
+        "sonarjs/no-nested-switch": "off",
+        "sonarjs/cognitive-complexity": "off",
+        "max-lines-per-function": "off"
+      }
+    }
+  ]
+}
