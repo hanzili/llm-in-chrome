@@ -48,6 +48,7 @@ export class AnthropicProvider extends BaseProvider {
       tools: tools,
       messages: cachedMessages,
       stream: useStreaming,
+      metadata: { user_id: 'browser_extension_user' },
     };
   }
 

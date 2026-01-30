@@ -26,7 +26,14 @@ export class GoogleProvider extends BaseProvider {
     const baseUrl = this.config.apiBaseUrl;
     const endpoint = useStreaming ? 'streamGenerateContent' : 'generateContent';
     const streamParam = useStreaming ? '&alt=sse' : '';
-    return `${baseUrl}/${this.config.model}:${endpoint}?key=${this.config.apiKey}${streamParam}`;
+    const url = `${baseUrl}/${this.config.model}:${endpoint}?key=${this.config.apiKey}${streamParam}`;
+    console.log('[GoogleProvider] Building URL:', {
+      baseUrl,
+      model: this.config.model,
+      hasApiKey: !!this.config.apiKey,
+      apiKeyLength: this.config.apiKey?.length,
+    });
+    return url;
   }
 
   buildRequestBody(messages, systemPrompt, tools, useStreaming) {
@@ -66,19 +73,14 @@ export class GoogleProvider extends BaseProvider {
       if (part.text) {
         content.push({ type: 'text', text: part.text });
       } else if (part.functionCall) {
-        const toolUseBlock = {
+        // Note: We intentionally don't preserve thoughtSignature here
+        // to keep responses in canonical format compatible with all providers
+        content.push({
           type: 'tool_use',
           id: part.functionCall.id || `call_${Date.now()}`,
           name: part.functionCall.name,
           input: part.functionCall.args || {},
-        };
-
-        // Preserve thought signature for Gemini thinking models
-        if (part.thoughtSignature) {
-          toolUseBlock.thoughtSignature = part.thoughtSignature;
-        }
-
-        content.push(toolUseBlock);
+        });
       }
     }
 
@@ -144,18 +146,13 @@ export class GoogleProvider extends BaseProvider {
 
             // Handle function calls
             if (part.functionCall) {
-              const toolCall = {
+              // Note: We intentionally don't preserve thoughtSignature
+              // to keep responses in canonical format compatible with all providers
+              toolCalls.push({
                 id: part.functionCall.id || `call_${Date.now()}_${toolCalls.length}`,
                 name: part.functionCall.name,
                 input: part.functionCall.args || {},
-              };
-
-              // Extract thought signature for Gemini 2.5/3.x thinking models
-              if (part.thoughtSignature) {
-                toolCall.thoughtSignature = part.thoughtSignature;
-              }
-
-              toolCalls.push(toolCall);
+              });
             }
           }
 
@@ -174,21 +171,14 @@ export class GoogleProvider extends BaseProvider {
       result.content.push({ type: 'text', text: currentText });
     }
 
-    // Add tool calls
+    // Add tool calls (canonical format, no provider-specific fields)
     for (const toolCall of toolCalls) {
-      const toolUseBlock = {
+      result.content.push({
         type: 'tool_use',
         id: toolCall.id,
         name: toolCall.name,
         input: toolCall.input,
-      };
-
-      // Preserve thought signature for Gemini thinking models
-      if (toolCall.thoughtSignature) {
-        toolUseBlock.thoughtSignature = toolCall.thoughtSignature;
-      }
-
-      result.content.push(toolUseBlock);
+      });
     }
 
     // Ensure content is never empty
@@ -237,7 +227,6 @@ export class GoogleProvider extends BaseProvider {
   _convertMessages(anthropicMessages) {
     const googleMessages = [];
     const toolUseIdToName = {}; // Track tool_use_id -> function name mapping
-    const toolUseIdToSignature = {}; // Track tool_use_id -> thought signature mapping
 
     for (const msg of anthropicMessages) {
       const role = msg.role === 'assistant' ? 'model' : msg.role;
@@ -255,24 +244,14 @@ export class GoogleProvider extends BaseProvider {
           } else if (block.type === 'tool_use') {
             // Track the mapping for later tool_result conversion
             toolUseIdToName[block.id] = block.name;
-            if (block.thoughtSignature) {
-              toolUseIdToSignature[block.id] = block.thoughtSignature;
-            }
 
             // Convert to Google's functionCall format
-            const functionCallPart = {
+            parts.push({
               functionCall: {
                 name: block.name,
                 args: block.input,
               },
-            };
-
-            // Include thought signature for Gemini thinking models
-            if (block.thoughtSignature) {
-              functionCallPart.thoughtSignature = block.thoughtSignature;
-            }
-
-            parts.push(functionCallPart);
+            });
           } else if (block.type === 'tool_result') {
             // Convert to Google's functionResponse format
             let responseContent = block.content;
@@ -287,20 +266,12 @@ export class GoogleProvider extends BaseProvider {
             // Look up the function name from the tool_use_id
             const functionName = toolUseIdToName[block.tool_use_id] || 'unknown';
 
-            const functionResponsePart = {
+            parts.push({
               functionResponse: {
                 name: functionName,
                 response: { result: responseContent },
               },
-            };
-
-            // Include thought signature for Gemini thinking models
-            const thoughtSignature = toolUseIdToSignature[block.tool_use_id];
-            if (thoughtSignature) {
-              functionResponsePart.thoughtSignature = thoughtSignature;
-            }
-
-            parts.push(functionResponsePart);
+            });
           }
         }
       }

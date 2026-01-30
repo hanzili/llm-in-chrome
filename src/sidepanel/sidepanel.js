@@ -157,10 +157,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('skill-form-close').addEventListener('click', hideSkillForm);
   document.getElementById('skill-form-cancel').addEventListener('click', hideSkillForm);
 
-  // OAuth login/logout
-  document.getElementById('oauth-login-btn').addEventListener('click', handleOAuthLogin);
-  document.getElementById('oauth-logout-btn').addEventListener('click', handleOAuthLogout);
+  // CLI import/logout (Claude Code Plan)
   document.getElementById('import-cli-btn').addEventListener('click', handleImportCLI);
+  document.getElementById('cli-logout-btn').addEventListener('click', handleCLILogout);
+
+  // Codex import/logout (Codex Plan)
+  document.getElementById('import-codex-btn').addEventListener('click', handleImportCodex);
+  document.getElementById('codex-logout-btn').addEventListener('click', handleCodexLogout);
 
   // Ask before acting toggle
   askToggle.addEventListener('click', () => {
@@ -240,7 +243,7 @@ async function loadConfig() {
   userSkills = config.userSkills || [];
   builtInSkills = config.builtInSkills || [];
 
-  await updateOAuthStatus();
+  await updateCLIStatus();
   await buildAvailableModels();
   updateModelDisplay();
   renderModelList();
@@ -252,25 +255,81 @@ async function loadConfig() {
 async function buildAvailableModels() {
   availableModels = [];
 
-  // Check if OAuth is enabled
+  // Check if Claude OAuth is enabled
   const oauthStatus = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
   const hasOAuth = oauthStatus && oauthStatus.isOAuthEnabled && oauthStatus.isAuthenticated;
 
+  // Check if Codex OAuth is enabled
+  const codexStatus = await chrome.runtime.sendMessage({ type: 'GET_CODEX_STATUS' });
+  const hasCodexOAuth = codexStatus && codexStatus.isAuthenticated;
+
+  // Add Codex Plan models if connected (before other providers)
+  // Valid models for ChatGPT Plus accounts via Codex CLI
+  if (hasCodexOAuth) {
+    const codexModels = [
+      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max (Recommended)' },
+      { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex' },
+      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini (Faster)' },
+      { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
+      { id: 'gpt-5-codex', name: 'GPT-5 Codex' },
+    ];
+    for (const model of codexModels) {
+      availableModels.push({
+        name: model.name,
+        provider: 'codex',
+        modelId: model.id,
+        baseUrl: 'https://chatgpt.com/backend-api/codex/responses',
+        apiKey: null,
+        authMethod: 'codex_oauth',
+      });
+    }
+  }
+
   // Add models from configured providers
   for (const [providerId, provider] of Object.entries(PROVIDERS)) {
-    // For Anthropic: show models if OAuth is enabled OR if API key is configured
-    const isAnthropicWithOAuth = providerId === 'anthropic' && hasOAuth;
     const hasApiKey = providerKeys[providerId];
 
-    if (isAnthropicWithOAuth || hasApiKey) {
-      for (const model of provider.models) {
-        availableModels.push({
-          name: model.name,
-          provider: providerId,
-          modelId: model.id,
-          baseUrl: provider.baseUrl,
-          apiKey: hasApiKey ? providerKeys[providerId] : null, // null means use OAuth
-        });
+    // Special handling for Anthropic: show separate entries for OAuth and API key
+    if (providerId === 'anthropic') {
+      // Add OAuth models (Claude Code Plan) if connected
+      if (hasOAuth) {
+        for (const model of provider.models) {
+          availableModels.push({
+            name: hasApiKey ? `${model.name} (Pro/Max)` : model.name,
+            provider: providerId,
+            modelId: model.id,
+            baseUrl: provider.baseUrl,
+            apiKey: null,
+            authMethod: 'oauth',
+          });
+        }
+      }
+
+      // Add API key models if configured
+      if (hasApiKey) {
+        for (const model of provider.models) {
+          availableModels.push({
+            name: hasOAuth ? `${model.name} (API)` : model.name,
+            provider: providerId,
+            modelId: model.id,
+            baseUrl: provider.baseUrl,
+            apiKey: providerKeys[providerId],
+            authMethod: 'apikey',
+          });
+        }
+      }
+    } else {
+      // Other providers: just check for API key
+      if (hasApiKey) {
+        for (const model of provider.models) {
+          availableModels.push({
+            name: model.name,
+            provider: providerId,
+            modelId: model.id,
+            baseUrl: provider.baseUrl,
+            apiKey: providerKeys[providerId],
+          });
+        }
       }
     }
   }
@@ -293,6 +352,7 @@ async function buildAvailableModels() {
 }
 
 async function saveConfig() {
+  const currentModel = availableModels[currentModelIndex];
   await chrome.runtime.sendMessage({
     type: 'SAVE_CONFIG',
     payload: {
@@ -301,10 +361,11 @@ async function saveConfig() {
       currentModelIndex,
       userSkills,
       // Also set the active model config for the service worker
-      ...(availableModels[currentModelIndex] ? {
-        model: availableModels[currentModelIndex].modelId,
-        apiBaseUrl: availableModels[currentModelIndex].baseUrl,
-        apiKey: availableModels[currentModelIndex].apiKey,
+      ...(currentModel ? {
+        model: currentModel.modelId,
+        apiBaseUrl: currentModel.baseUrl,
+        apiKey: currentModel.apiKey,
+        authMethod: currentModel.authMethod || null,
       } : {}),
     },
   });
@@ -378,7 +439,7 @@ async function openSettings() {
   renderCustomModelsList();
   renderSkillsList();
   hideSkillForm(); // Hide and reset skill form when opening
-  await updateOAuthStatus(); // Check OAuth login status
+  await updateCLIStatus(); // Check OAuth login status
 }
 
 function closeSettings() {
@@ -439,175 +500,150 @@ async function saveSettings() {
   closeSettings();
 }
 
-// OAuth handlers
-async function handleOAuthLogin() {
-  console.log('[Sidepanel] ===== OAuth Login Button Clicked =====');
-  const btn = document.getElementById('oauth-login-btn');
-  const statusEl = document.getElementById('oauth-status');
+// CLI import handlers
+async function handleImportCLI() {
+  const btn = document.getElementById('import-cli-btn');
+  const statusEl = document.getElementById('cli-status');
 
-  console.log('[Sidepanel] Disabling button and showing status...');
   btn.disabled = true;
-  btn.textContent = 'Opening login...';
-  statusEl.style.display = 'block';
-  statusEl.textContent = 'Opening Claude login popup...';
+  document.getElementById('import-cli-btn-text').textContent = 'Connecting...';
 
   try {
-    console.log('[Sidepanel] Sending START_OAUTH_LOGIN message to service worker...');
-    const response = await chrome.runtime.sendMessage({ type: 'START_OAUTH_LOGIN' });
-    console.log('[Sidepanel] Response received:', response);
+    const response = await chrome.runtime.sendMessage({ type: 'IMPORT_CLI_CREDENTIALS' });
 
     if (response.success) {
-      console.log('[Sidepanel] ✓ OAuth login successful!');
-      statusEl.textContent = '✓ Successfully logged in with Claude!';
-      statusEl.style.color = '#4CAF50';
-      statusEl.style.display = 'block';
-
-      // Update UI to show logged in state
-      console.log('[Sidepanel] Updating UI to show logged in state...');
-      document.getElementById('oauth-btn-text').textContent = '✓ Logged in with OAuth';
-      document.getElementById('oauth-logout-btn').style.display = 'block';
+      // Update UI
       btn.style.display = 'none';
-      document.getElementById('import-cli-btn').style.display = 'none';
+      document.getElementById('cli-logout-btn').style.display = 'block';
+      document.getElementById('cli-status-badge').style.display = 'inline';
 
-      // Rebuild models to show Anthropic models
       await buildAvailableModels();
       updateModelDisplay();
       renderModelList();
-      await updateProviderStatuses();
-
-      console.log('[Sidepanel] ✓ Auth method saved');
     } else {
-      console.error('[Sidepanel] ✗ OAuth login failed:', response.error);
-      throw new Error(response.error || 'OAuth login failed');
+      throw new Error(response.error || 'Import failed');
     }
   } catch (error) {
-    console.error('[Sidepanel] ✗ OAuth login error:', error);
-    console.error('[Sidepanel] Error message:', error.message);
-    console.error('[Sidepanel] Error stack:', error.stack);
-    statusEl.textContent = `✗ Login failed: ${error.message}`;
+    statusEl.textContent = error.message;
+    statusEl.style.display = 'block';
     statusEl.style.color = '#ff6b6b';
     btn.disabled = false;
-    btn.textContent = 'Login with Claude Account';
+    document.getElementById('import-cli-btn-text').textContent = 'Connect';
   }
 }
 
-async function handleOAuthLogout() {
-  const logoutBtn = document.getElementById('oauth-logout-btn');
-  const loginBtn = document.getElementById('oauth-login-btn');
-  const importBtn = document.getElementById('import-cli-btn');
-  const statusEl = document.getElementById('oauth-status');
-
+async function handleCLILogout() {
   try {
-    // Send message to service worker to logout
     await chrome.runtime.sendMessage({ type: 'OAUTH_LOGOUT' });
 
-    // Update UI
-    loginBtn.style.display = 'flex';
-    importBtn.style.display = 'flex';
-    document.getElementById('oauth-btn-text').textContent = 'Direct OAuth Login';
-    logoutBtn.style.display = 'none';
-    statusEl.textContent = 'Logged out';
-    statusEl.style.color = 'var(--text-secondary)';
-    statusEl.style.display = 'block';
+    document.getElementById('import-cli-btn').style.display = 'block';
+    document.getElementById('import-cli-btn').disabled = false;
+    document.getElementById('import-cli-btn-text').textContent = 'Connect';
+    document.getElementById('cli-logout-btn').style.display = 'none';
+    document.getElementById('cli-status-badge').style.display = 'none';
+    document.getElementById('cli-status').style.display = 'none';
 
-    // Rebuild models (remove Anthropic models if no API key)
     await buildAvailableModels();
     updateModelDisplay();
     renderModelList();
     await updateProviderStatuses();
-
-    setTimeout(() => {
-      statusEl.style.display = 'none';
-    }, 2000);
   } catch (error) {
-    console.error('OAuth logout error:', error);
-    statusEl.textContent = `✗ Logout failed: ${error.message}`;
+    const statusEl = document.getElementById('cli-status');
+    statusEl.textContent = error.message;
     statusEl.style.color = '#ff6b6b';
   }
 }
 
-async function handleImportCLI() {
-  console.log('[Sidepanel] ===== Import CLI Tokens Button Clicked =====');
-  const btn = document.getElementById('import-cli-btn');
-  const statusEl = document.getElementById('oauth-status');
+async function updateCLIStatus() {
+  const response = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
 
-  console.log('[Sidepanel] Disabling button and showing status...');
+  if (response && response.isAuthenticated) {
+    document.getElementById('import-cli-btn').style.display = 'none';
+    document.getElementById('cli-logout-btn').style.display = 'block';
+    document.getElementById('cli-status-badge').style.display = 'inline';
+    document.getElementById('cli-status').style.display = 'none';
+  } else {
+    document.getElementById('import-cli-btn').style.display = 'block';
+    document.getElementById('cli-logout-btn').style.display = 'none';
+    document.getElementById('cli-status-badge').style.display = 'none';
+    document.getElementById('cli-status').style.display = 'none';
+  }
+
+  // Update Codex status too
+  await updateCodexStatus();
+}
+
+// Codex import handlers
+async function handleImportCodex() {
+  const btn = document.getElementById('import-codex-btn');
+  const statusEl = document.getElementById('codex-status');
+
   btn.disabled = true;
-  btn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg> <span>Importing...</span>';
-  statusEl.style.display = 'block';
-  statusEl.textContent = 'Reading Claude CLI credentials...';
+  document.getElementById('import-codex-btn-text').textContent = 'Connecting...';
 
   try {
-    console.log('[Sidepanel] Sending IMPORT_CLI_CREDENTIALS message to service worker...');
-    const response = await chrome.runtime.sendMessage({ type: 'IMPORT_CLI_CREDENTIALS' });
-    console.log('[Sidepanel] Response received:', response);
+    const response = await chrome.runtime.sendMessage({ type: 'IMPORT_CODEX_CREDENTIALS' });
+
+    if (!response) {
+      throw new Error('No response from service worker');
+    }
 
     if (response.success) {
-      console.log('[Sidepanel] ✓ CLI credentials import successful!');
-      statusEl.textContent = '✓ Successfully imported Claude CLI tokens!';
-      statusEl.style.color = '#4CAF50';
-
-      // Update UI to show logged in state
-      console.log('[Sidepanel] Updating UI to show logged in state...');
-      document.getElementById('oauth-btn-text').textContent = '✓ Using Claude CLI Tokens';
-      document.getElementById('oauth-logout-btn').style.display = 'block';
-      document.getElementById('oauth-login-btn').style.display = 'none';
+      // Update UI
       btn.style.display = 'none';
+      document.getElementById('codex-logout-btn').style.display = 'block';
+      document.getElementById('codex-status-badge').style.display = 'inline';
+      statusEl.style.display = 'none';
 
-      // Rebuild models to show Anthropic models
       await buildAvailableModels();
       updateModelDisplay();
       renderModelList();
-
-      console.log('[Sidepanel] ✓ UI updated');
     } else {
-      console.error('[Sidepanel] ✗ CLI import failed:', response.error);
-      throw new Error(response.error || 'CLI credentials import failed');
+      throw new Error(response.error || 'Import failed');
     }
   } catch (error) {
-    console.error('[Sidepanel] ✗ CLI import error:', error);
-    console.error('[Sidepanel] Error message:', error.message);
-    statusEl.textContent = `✗ Import failed: ${error.message}`;
+    statusEl.textContent = error.message;
+    statusEl.style.display = 'block';
     statusEl.style.color = '#ff6b6b';
     btn.disabled = false;
-    btn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> <span>Import Claude CLI Tokens</span>';
+    document.getElementById('import-codex-btn-text').textContent = 'Connect';
   }
 }
 
-async function updateOAuthStatus() {
-  // Check if user is authenticated with OAuth
-  const response = await chrome.runtime.sendMessage({ type: 'GET_OAUTH_STATUS' });
-  const { tokenSource } = await chrome.storage.local.get('tokenSource');
+async function handleCodexLogout() {
+  try {
+    await chrome.runtime.sendMessage({ type: 'CODEX_LOGOUT' });
 
-  if (response && response.isOAuthEnabled && response.isAuthenticated) {
-    // Show logged in state
-    document.getElementById('oauth-login-btn').style.display = 'none';
-    document.getElementById('import-cli-btn').style.display = 'none';
-    document.getElementById('oauth-logout-btn').style.display = 'block';
+    document.getElementById('import-codex-btn').style.display = 'block';
+    document.getElementById('import-codex-btn').disabled = false;
+    document.getElementById('import-codex-btn-text').textContent = 'Connect';
+    document.getElementById('codex-logout-btn').style.display = 'none';
+    document.getElementById('codex-status-badge').style.display = 'none';
+    document.getElementById('codex-status').style.display = 'none';
 
-    const statusEl = document.getElementById('oauth-status');
-    statusEl.style.display = 'block';
-    statusEl.style.color = '#4CAF50';
+    await buildAvailableModels();
+    updateModelDisplay();
+    renderModelList();
+  } catch (error) {
+    const statusEl = document.getElementById('codex-status');
+    statusEl.textContent = error.message;
+    statusEl.style.color = '#ff6b6b';
+  }
+}
 
-    // Show different text based on token source
-    if (tokenSource === 'claude_cli') {
-      document.getElementById('oauth-btn-text').textContent = '✓ Using Claude CLI Tokens';
-    } else {
-      document.getElementById('oauth-btn-text').textContent = '✓ Logged in with OAuth';
-    }
+async function updateCodexStatus() {
+  const response = await chrome.runtime.sendMessage({ type: 'GET_CODEX_STATUS' });
 
-    // Just show that it's active - no need to show countdown since it auto-refreshes
-    if (tokenSource === 'claude_cli') {
-      statusEl.textContent = '✓ Connected to Claude CLI (auto-refreshes)';
-    } else {
-      statusEl.textContent = '✓ Authenticated (auto-refreshes)';
-    }
+  if (response && response.isAuthenticated) {
+    document.getElementById('import-codex-btn').style.display = 'none';
+    document.getElementById('codex-logout-btn').style.display = 'block';
+    document.getElementById('codex-status-badge').style.display = 'inline';
+    document.getElementById('codex-status').style.display = 'none';
   } else {
-    // Show logged out state
-    document.getElementById('oauth-login-btn').style.display = 'flex';
-    document.getElementById('import-cli-btn').style.display = 'flex';
-    document.getElementById('oauth-logout-btn').style.display = 'none';
-    document.getElementById('oauth-status').style.display = 'none';
+    document.getElementById('import-codex-btn').style.display = 'block';
+    document.getElementById('codex-logout-btn').style.display = 'none';
+    document.getElementById('codex-status-badge').style.display = 'none';
+    document.getElementById('codex-status').style.display = 'none';
   }
 }
 

@@ -3,7 +3,7 @@
  * Handles API calls, streaming responses, and configuration.
  */
 
-import { TOOL_DEFINITIONS, getToolsForUrl } from '../../tools/definitions.js';
+import { getToolsForUrl } from '../../tools/definitions.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import { DOMAIN_SKILLS } from './domain-skills.js';
 import { createProvider } from './providers/provider-factory.js';
@@ -67,8 +67,11 @@ export async function getApiHeaders() {
   const provider = createProvider(config.apiBaseUrl || '', config);
   const providerHeaders = await provider.getHeaders();
 
-  // Check if using OAuth authentication
-  if (config.authMethod === 'oauth') {
+  // OAuth only applies to Anthropic - don't add OAuth headers to other providers
+  const isAnthropic = config.apiBaseUrl?.includes('anthropic.com');
+
+  // Check if using OAuth authentication (only for Anthropic)
+  if (isAnthropic && config.authMethod === 'oauth') {
     const accessToken = await getAccessToken();
 
     if (accessToken) {
@@ -188,13 +191,13 @@ function getNativeHostPort() {
  */
 async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
   const provider = createProvider(config.apiBaseUrl || '', config);
-  const useStreaming = onTextChunk !== null;
   const systemPrompt = buildSystemPrompt();
+  const useStreaming = onTextChunk !== null;
 
   // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
-  const tools = currentUrl ? getToolsForUrl(currentUrl) : TOOL_DEFINITIONS;
+  // Always use getToolsForUrl to ensure _domains property is stripped (API rejects unknown properties)
+  const tools = getToolsForUrl(currentUrl);
 
-  // Build request body
   const requestBody = provider.buildRequestBody(messages, systemPrompt, tools, useStreaming);
   const apiUrl = provider.buildUrl(useStreaming);
   const requestBodyStr = JSON.stringify(requestBody);
@@ -206,9 +209,71 @@ async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {},
   return new Promise((resolve, reject) => {
     const port = getNativeHostPort();
 
-    // Create unique listener for this API call
+    // Accumulate streaming response
+    let streamResult = {
+      content: [],
+      stop_reason: null,
+      usage: null
+    };
+    let currentTextBlock = null;
+    let currentToolUse = null;
+
     const messageListener = async (message) => {
-      if (message.type === 'api_response') {
+      if (message.type === 'stream_chunk') {
+        const event = message.data;
+
+        // Handle different SSE event types
+        if (event.type === 'content_block_start') {
+          if (event.content_block?.type === 'text') {
+            currentTextBlock = { type: 'text', text: '' };
+          } else if (event.content_block?.type === 'tool_use') {
+            currentToolUse = {
+              type: 'tool_use',
+              id: event.content_block.id,
+              name: event.content_block.name,
+              input: {}
+            };
+          }
+        } else if (event.type === 'content_block_delta') {
+          if (event.delta?.type === 'text_delta' && currentTextBlock) {
+            currentTextBlock.text += event.delta.text;
+            if (onTextChunk) onTextChunk(event.delta.text);
+          } else if (event.delta?.type === 'input_json_delta' && currentToolUse) {
+            // Accumulate JSON string for tool input
+            currentToolUse._inputJson = (currentToolUse._inputJson || '') + event.delta.partial_json;
+          }
+        } else if (event.type === 'content_block_stop') {
+          if (currentTextBlock) {
+            streamResult.content.push(currentTextBlock);
+            currentTextBlock = null;
+          } else if (currentToolUse) {
+            try {
+              currentToolUse.input = JSON.parse(currentToolUse._inputJson || '{}');
+            } catch (e) {
+              currentToolUse.input = {};
+            }
+            delete currentToolUse._inputJson;
+            streamResult.content.push(currentToolUse);
+            currentToolUse = null;
+          }
+        } else if (event.type === 'message_delta') {
+          streamResult.stop_reason = event.delta?.stop_reason;
+          streamResult.usage = event.usage;
+        }
+      } else if (message.type === 'stream_end') {
+        port.onMessage.removeListener(messageListener);
+        const duration = Date.now() - startTime;
+
+        await log('API', `#${callNumber} ${config.model} → ${streamResult.stop_reason}`, {
+          model: config.model,
+          messages: messages.length,
+          stopReason: streamResult.stop_reason,
+          tokens: streamResult.usage,
+          duration: `${duration}ms`,
+        });
+
+        resolve(streamResult);
+      } else if (message.type === 'api_response') {
         port.onMessage.removeListener(messageListener);
 
         if (message.status !== 200) {
@@ -247,7 +312,7 @@ async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {},
       data: {
         url: apiUrl,
         method: 'POST',
-        headers: {}, // Native host will add auth headers
+        headers: {},
         body: requestBodyStr
       }
     });
@@ -264,10 +329,13 @@ async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {},
 export async function callLLM(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
   await loadConfig();
 
-  // If using OAuth, route through native messaging proxy
-  if (config.authMethod === 'oauth') {
-    return await callLLMThroughProxy(messages, null, log, currentUrl);
-  }
+  // Debug: log config values
+  console.log('[API] Config loaded:', {
+    apiBaseUrl: config.apiBaseUrl,
+    model: config.model,
+    hasApiKey: !!config.apiKey,
+    apiKeyPrefix: config.apiKey ? config.apiKey.substring(0, 10) + '...' : 'none',
+  });
 
   // Create provider instance
   const provider = createProvider(config.apiBaseUrl || '', config);
@@ -276,11 +344,25 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
   const systemPrompt = buildSystemPrompt();
 
   // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
-  const tools = currentUrl ? getToolsForUrl(currentUrl) : TOOL_DEFINITIONS;
+  // Always use getToolsForUrl to ensure _domains property is stripped (API rejects unknown properties)
+  const tools = getToolsForUrl(currentUrl);
 
   // Build provider-specific request body and URL
   const requestBody = provider.buildRequestBody(messages, systemPrompt, tools, useStreaming);
   const apiUrl = provider.buildUrl(useStreaming);
+
+  // If calling Anthropic API directly with OAuth, use native host proxy (bypasses CORS)
+  // API key calls try direct fetch first (with dangerous-direct-browser-access header)
+  if (apiUrl.includes('api.anthropic.com') && config.authMethod === 'oauth') {
+    return await callLLMThroughProxy(messages, onTextChunk, log, currentUrl);
+  }
+
+  // If calling Codex API (ChatGPT backend), use the provider's native messaging call
+  // CodexProvider has its own call() method that handles native messaging with OpenAI SSE format
+  if (apiUrl.includes('chatgpt.com') && config.authMethod === 'codex_oauth') {
+    const result = await provider.call(messages, systemPrompt, tools, onTextChunk, log);
+    return result;
+  }
 
   // Add timeout to prevent hanging requests (2 minutes for API calls)
   const timeoutMs = 120000;

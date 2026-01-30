@@ -17,6 +17,7 @@ import {
 import { manageMemory, getMemoryStats } from './modules/memory-manager.js';
 import { compactIfNeeded, calculateContextTokens } from './modules/conversation-compaction.js';
 import { startOAuthLogin, importCLICredentials, logout, getAuthStatus } from './modules/oauth-manager.js';
+import { importCodexCredentials, logoutCodex, getCodexAuthStatus } from './modules/codex-oauth-manager.js';
 import { hasHandler, executeToolHandler } from './tool-handlers/index.js';
 import { log, clearLog, saveTaskLogs, initLogging } from './managers/logging-manager.js';
 import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking } from './managers/debugger-manager.js';
@@ -806,6 +807,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       conversationHistory = [];
       sendResponse({ success: true });
       return false;
+
+    case 'IMPORT_CODEX_CREDENTIALS':
+      console.log('[ServiceWorker] IMPORT_CODEX_CREDENTIALS message received');
+      console.log('[ServiceWorker] Calling importCodexCredentials()...');
+      importCodexCredentials()
+        .then(async credentials => {
+          console.log('[ServiceWorker] ✓ Codex credentials import successful');
+          console.log('[ServiceWorker] Reloading config...');
+          await loadConfig();
+          console.log('[ServiceWorker] Credentials received, sending response to sidepanel');
+          sendResponse({ success: true, credentials });
+        })
+        .catch(error => {
+          console.error('[ServiceWorker] ✗ Codex credentials import failed:', error);
+          console.error('[ServiceWorker] Error message:', error.message);
+          sendResponse({ success: false, error: error.message });
+        });
+      return true;
+
+    case 'CODEX_LOGOUT':
+      console.log('[ServiceWorker] CODEX_LOGOUT message received');
+      logoutCodex().then(async () => {
+        console.log('[ServiceWorker] ✓ Codex logout complete');
+        await loadConfig();
+        sendResponse({ success: true });
+      });
+      return true;
+
+    case 'GET_CODEX_STATUS':
+      console.log('[ServiceWorker] GET_CODEX_STATUS message received');
+      getCodexAuthStatus().then(status => {
+        console.log('[ServiceWorker] Codex status:', status);
+        sendResponse(status);
+      });
+      return true;
   }
 });
 
