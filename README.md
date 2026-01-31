@@ -2,6 +2,12 @@
 
 An autonomous browser agent that lets any LLM control your browser. Multi-provider support (Claude, GPT, Gemini, Mistral, Qwen) with full browser automation capabilities.
 
+## Demo
+
+[![demo video](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
+
+Shows the agent applying to jobs, unsubscribing from emails in Gmail, and completing challenges with captchas and anti-bot protections.
+
 ## Features
 
 - **Browser Automation**: Click, type, scroll, drag, and navigate web pages
@@ -149,48 +155,6 @@ Alternatively, use API keys for pay-per-use billing:
 | `javascript_tool` | Execute JavaScript on pages |
 | `read_console_messages` | Get browser console logs |
 | `read_network_requests` | Get network request history |
-
-## Architecture
-
-```
-src/
-├── background/
-│   ├── service-worker.js      # Main orchestration, agent loop
-│   ├── modules/
-│   │   ├── cdp-helper.js      # Chrome DevTools Protocol wrapper
-│   │   ├── key-definitions.js # Keyboard key codes
-│   │   ├── mac-commands.js    # macOS keyboard shortcuts
-│   │   ├── screenshot-context.js # DPR coordinate scaling
-│   │   ├── api.js             # LLM API calls
-│   │   └── providers/         # Multi-provider support
-│   ├── tool-handlers/         # Browser automation tools
-│   └── managers/              # State management modules
-├── content/
-│   ├── content-script.js      # Injected into pages
-│   └── accessibility-tree.js  # Accessibility tree generation
-├── sidepanel/
-│   ├── sidepanel.html         # Side panel UI
-│   └── sidepanel.js           # Side panel logic
-└── tools/
-    └── definitions.js         # Tool schemas
-```
-
-## Development
-
-### Key Components
-
-| Component | Purpose |
-|-----------|---------|
-| `cdp-helper.js` | Chrome DevTools Protocol wrapper for browser control |
-| `tool-handlers/` | Implementations for each browser automation tool |
-| `accessibility-tree.js` | Converts DOM to accessible element references |
-| `providers/` | LLM provider adapters (Anthropic, OpenAI, Google, OpenRouter) |
-
-### Running Tests
-
-```bash
-npm test
-```
 
 ## Contributing
 
