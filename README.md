@@ -1,6 +1,6 @@
-# Job Apply Extension
+# LLM in Chrome
 
-A Chrome extension that provides Claude-powered browser automation, extracted and documented from Claude in Chrome for full behavioral compatibility.
+An autonomous browser agent that lets any LLM control your browser. Multi-provider support (Claude, GPT, Gemini, Mistral, Qwen) with full browser automation capabilities.
 
 ## Features
 
@@ -23,8 +23,8 @@ A Chrome extension that provides Claude-powered browser automation, extracted an
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/your-repo/job-apply-extension.git
-   cd job-apply-extension
+   git clone https://github.com/hanzili/llm-in-chrome.git
+   cd llm-in-chrome
    ```
 
 2. Open Chrome and navigate to `chrome://extensions`
@@ -36,6 +36,88 @@ A Chrome extension that provides Claude-powered browser automation, extracted an
 5. The extension icon should appear in your toolbar
 
 ### Configuration
+
+You can use either **subscription-based plans** (no API billing) or **API keys** (pay-per-use).
+
+#### Subscription Plans (Recommended)
+
+Use your existing Claude or ChatGPT subscription - no API billing!
+
+### Claude Code Plan Setup
+
+Use your Claude Pro/Max subscription ($20-200/month) instead of paying per API call.
+
+**Prerequisites:**
+- Claude Pro or Max subscription
+- Claude Code CLI installed
+
+**Steps:**
+
+1. **Install Claude Code CLI:**
+   ```bash
+   # macOS/Linux
+   curl -fsSL https://claude.ai/install.sh | sh
+
+   # Or with npm
+   npm install -g @anthropic-ai/claude-code
+   ```
+
+2. **Login to Claude Code:**
+   ```bash
+   claude login
+   ```
+   This opens a browser window to authenticate with your Claude account.
+
+3. **Install Native Host** (required for Chrome extension):
+   ```bash
+   cd native-host
+   ./install.sh
+   ```
+
+4. **Connect in Extension:**
+   - Open the extension settings
+   - Click "Connect" under Claude Code Plan
+   - The extension will read credentials from `~/.claude/credentials.json`
+
+**Models available:** Opus 4.5, Opus 4, Sonnet 4, Haiku 4.5 (labeled as "Claude Code")
+
+### Codex Plan Setup
+
+Use your ChatGPT Pro/Plus subscription ($20-200/month) instead of paying per API call.
+
+**Prerequisites:**
+- ChatGPT Pro or Plus subscription
+- Codex CLI installed
+
+**Steps:**
+
+1. **Install Codex CLI:**
+   ```bash
+   npm install -g @openai/codex
+   ```
+
+2. **Login to Codex:**
+   ```bash
+   codex login
+   ```
+   This opens a browser window to authenticate with your OpenAI/ChatGPT account.
+
+3. **Install Native Host** (required for Chrome extension):
+   ```bash
+   cd native-host
+   ./install.sh
+   ```
+
+4. **Connect in Extension:**
+   - Open the extension settings
+   - Click "Connect" under Codex Plan
+   - The extension will read credentials from `~/.codex/auth.json`
+
+**Models available:** GPT-5.1 Codex Max, GPT-5.2 Codex, GPT-5.1 Codex Mini (labeled as "Codex Plan")
+
+#### API Keys (Pay-per-use)
+
+Alternatively, use API keys for pay-per-use billing:
 
 1. Click the extension icon and open Settings
 2. Enter your API key for your preferred provider:
@@ -49,7 +131,7 @@ A Chrome extension that provides Claude-powered browser automation, extracted an
 1. Navigate to any web page
 2. Click the extension icon to open the side panel
 3. Describe what you want to accomplish
-4. Claude will use the available tools to complete your task
+4. The AI agent will autonomously browse and complete your task
 
 ### Available Tools
 
@@ -75,104 +157,47 @@ src/
 ├── background/
 │   ├── service-worker.js      # Main orchestration, agent loop
 │   ├── modules/
-│   │   ├── cdp-helper.js      # Chrome DevTools Protocol (copied from Claude in Chrome's `te` class)
-│   │   ├── key-definitions.js # Key codes (copied from Claude in Chrome's `ee` constant)
-│   │   ├── mac-commands.js    # Mac commands (copied from Claude in Chrome's `Z` constant)
+│   │   ├── cdp-helper.js      # Chrome DevTools Protocol wrapper
+│   │   ├── key-definitions.js # Keyboard key codes
+│   │   ├── mac-commands.js    # macOS keyboard shortcuts
 │   │   ├── screenshot-context.js # DPR coordinate scaling
 │   │   ├── api.js             # LLM API calls
-│   │   └── providers/         # Multi-provider support (Anthropic, OpenAI, Google, OpenRouter)
-│   └── tool-handlers/
-│       ├── computer-tool-claude.js   # Copied from Claude in Chrome's `ie` constant
-│       ├── navigation-tool-claude.js # Copied from Claude in Chrome's `Y` constant
-│       ├── form-tool-claude.js       # Copied from Claude in Chrome's `de` constant
-│       ├── read-page-tool-claude.js  # Copied from Claude in Chrome's `le` constant
-│       ├── utility-tools-claude.js   # find (`pe`), get_page_text (`he`), javascript_tool (`De`)
-│       ├── tabs-tool.js       # Our implementation
-│       ├── monitoring-tool.js # Our implementation
-│       └── agent-tool.js      # Our implementation
+│   │   └── providers/         # Multi-provider support
+│   ├── tool-handlers/         # Browser automation tools
+│   └── managers/              # State management modules
 ├── content/
 │   ├── content-script.js      # Injected into pages
-│   └── accessibility-tree.js  # A11y tree generation (uses __claudeElementMap naming)
+│   └── accessibility-tree.js  # Accessibility tree generation
 ├── sidepanel/
 │   ├── sidepanel.html         # Side panel UI
 │   └── sidepanel.js           # Side panel logic
 └── tools/
-    └── definitions.js         # Tool schemas for Claude
+    └── definitions.js         # Tool schemas
 ```
 
 ## Development
 
+### Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| `cdp-helper.js` | Chrome DevTools Protocol wrapper for browser control |
+| `tool-handlers/` | Implementations for each browser automation tool |
+| `accessibility-tree.js` | Converts DOM to accessible element references |
+| `providers/` | LLM provider adapters (Anthropic, OpenAI, Google, OpenRouter) |
+
 ### Running Tests
 
 ```bash
-# Unit tests
-node src/background/tool-handlers/computer-tool.test.js
-
-# Differential tests (compares behavior with Claude in Chrome)
-node tests/differential/run-differential-tests.js
+npm test
 ```
-
-### Key Files
-
-| File | Purpose |
-|------|---------|
-| `src/background/modules/cdp-helper.js` | Core browser automation (copied from Claude in Chrome's `te` class) |
-| `src/background/tool-handlers/computer-tool-claude.js` | Computer tool (copied from Claude in Chrome's `ie` constant) |
-| `src/content/accessibility-tree.js` | Accessibility tree generation (uses `__claudeElementMap`) |
-| `docs/CLAUDE_IN_CHROME_ARCHITECTURE.md` | Maps obfuscated names to real purposes |
-
-### Code Extraction from Claude in Chrome
-
-This extension's core automation code is **copied directly** from Claude in Chrome to ensure behavioral equivalence.
-
-#### Tool Handlers (Copied)
-
-| Claude in Chrome | This Extension | File |
-|-----------------|----------------|------|
-| `ie` (computer) | `handleComputer` | `tool-handlers/computer-tool-claude.js` |
-| `Y` (navigate) | `handleNavigate` | `tool-handlers/navigation-tool-claude.js` |
-| `de` (form_input) | `handleFormInput` | `tool-handlers/form-tool-claude.js` |
-| `le` (read_page) | `handleReadPage` | `tool-handlers/read-page-tool-claude.js` |
-| `pe` (find) | `handleFind` | `tool-handlers/utility-tools-claude.js` |
-| `he` (get_page_text) | `handleGetPageText` | `tool-handlers/utility-tools-claude.js` |
-| `De` (javascript_tool) | `handleJavaScriptTool` | `tool-handlers/utility-tools-claude.js` |
-
-#### Core Infrastructure (Copied)
-
-| Claude in Chrome | This Extension | Purpose |
-|-----------------|----------------|---------|
-| `te` class | `CDPHelper` | CDP command handling |
-| `re` instance | `cdpHelper` | Singleton instance |
-| `oe` function | `scaleCoordinates` | DPR coordinate scaling |
-| `ee` constant | `KEY_DEFINITIONS` | Keyboard key codes |
-| `Z` constant | `MAC_COMMANDS` | macOS keyboard commands |
-| `Q` class | `ScreenshotContextManager` | Screenshot context storage |
-
-#### API Headers
-
-Claude in Chrome uses `betas: ["oauth-2025-04-20"]` for OAuth authentication. No special "computer-use" beta header is required - the computer use feature is generally available.
-
-## Documentation
-
-- [Architecture](docs/CLAUDE_IN_CHROME_ARCHITECTURE.md) - Detailed mapping of Claude in Chrome internals
-- [Extraction Plan](docs/EXTRACTION_PLAN.md) - How code was extracted and organized
-- [Provider Architecture](docs/PROVIDER_ARCHITECTURE.md) - Multi-provider support design
-
-## Behavioral Equivalence
-
-The goal is **100% behavioral equivalence** with Claude in Chrome. This is verified through:
-
-1. **Differential Testing**: Same inputs → same CDP commands → same outputs
-2. **Line-by-line extraction**: Code logic is preserved exactly, only variable names change
-3. **Timing preservation**: All delays match the original (50ms, 100ms, 12ms, etc.)
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make changes (preserve behavioral equivalence!)
-4. Run differential tests: `node tests/differential/run-differential-tests.js`
-5. Submit a pull request
+3. Make changes
+4. Submit a pull request
 
 ## License
 
@@ -180,5 +205,5 @@ MIT License - see LICENSE file for details.
 
 ## Acknowledgments
 
-- Based on behavioral analysis of [Claude in Chrome](https://chrome.google.com/webstore/detail/claude/...) by Anthropic
-- Uses the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) for browser automation
+- Inspired by [Claude in Chrome](https://chrome.google.com/webstore/detail/claude/) by Anthropic
+- Built on the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)

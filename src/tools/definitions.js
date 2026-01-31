@@ -2,6 +2,14 @@
  * Tool Definitions for Browser Automation
  */
 
+/**
+ * Tools that only work with Claude models.
+ * These should be filtered out for other providers (OpenAI, Codex, etc.)
+ * - turn_answer_start: Claude signals before responding
+ * - update_plan: Claude's "ask before acting" planning tool
+ */
+export const CLAUDE_ONLY_TOOLS = ['turn_answer_start', 'update_plan'];
+
 export const TOOL_DEFINITIONS = [
   {
     name: 'read_page',
@@ -517,4 +525,13 @@ export function getToolsForUrl(url) {
       }
       return tool;
     });
+}
+
+/**
+ * Filter out Claude-only tools for non-Claude providers
+ * @param {Array} tools - Tool definitions array
+ * @returns {Array} Filtered tools without Claude-specific ones
+ */
+export function filterClaudeOnlyTools(tools) {
+  return tools.filter(tool => !CLAUDE_ONLY_TOOLS.includes(tool.name));
 }

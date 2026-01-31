@@ -263,19 +263,18 @@ async function buildAvailableModels() {
   const codexStatus = await chrome.runtime.sendMessage({ type: 'GET_CODEX_STATUS' });
   const hasCodexOAuth = codexStatus && codexStatus.isAuthenticated;
 
-  // Add Codex Plan models if connected (before other providers)
-  // Valid models for ChatGPT Plus accounts via Codex CLI
+  // Add Codex Plan models if connected (ChatGPT Pro plan via Codex CLI)
   if (hasCodexOAuth) {
     const codexModels = [
-      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max (Recommended)' },
+      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max' },
       { id: 'gpt-5.2-codex', name: 'GPT-5.2 Codex' },
-      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini (Faster)' },
+      { id: 'gpt-5.1-codex-mini', name: 'GPT-5.1 Codex Mini' },
       { id: 'gpt-5.1-codex', name: 'GPT-5.1 Codex' },
       { id: 'gpt-5-codex', name: 'GPT-5 Codex' },
     ];
     for (const model of codexModels) {
       availableModels.push({
-        name: model.name,
+        name: `${model.name} (Codex Plan)`,
         provider: 'codex',
         modelId: model.id,
         baseUrl: 'https://chatgpt.com/backend-api/codex/responses',
@@ -295,7 +294,7 @@ async function buildAvailableModels() {
       if (hasOAuth) {
         for (const model of provider.models) {
           availableModels.push({
-            name: hasApiKey ? `${model.name} (Pro/Max)` : model.name,
+            name: `${model.name} (Claude Code)`,
             provider: providerId,
             modelId: model.id,
             baseUrl: provider.baseUrl,
@@ -309,7 +308,7 @@ async function buildAvailableModels() {
       if (hasApiKey) {
         for (const model of provider.models) {
           availableModels.push({
-            name: hasOAuth ? `${model.name} (API)` : model.name,
+            name: `${model.name} (API)`,
             provider: providerId,
             modelId: model.id,
             baseUrl: provider.baseUrl,
@@ -318,8 +317,21 @@ async function buildAvailableModels() {
           });
         }
       }
+    } else if (providerId === 'openai') {
+      // OpenAI: label as API to distinguish from Codex Plan
+      if (hasApiKey) {
+        for (const model of provider.models) {
+          availableModels.push({
+            name: `${model.name} (API)`,
+            provider: providerId,
+            modelId: model.id,
+            baseUrl: provider.baseUrl,
+            apiKey: providerKeys[providerId],
+          });
+        }
+      }
     } else {
-      // Other providers: just check for API key
+      // Other providers (Google, OpenRouter): just check for API key
       if (hasApiKey) {
         for (const model of provider.models) {
           availableModels.push({
@@ -1369,9 +1381,11 @@ function createStepsSection() {
   `;
 
   // Toggle expand/collapse
-  stepsSection.querySelector('.steps-toggle').addEventListener('click', () => {
-    const toggle = stepsSection.querySelector('.steps-toggle');
-    const list = stepsSection.querySelector('.steps-list');
+  // IMPORTANT: Capture local references to avoid closure bug when multiple steps sections exist
+  const thisSection = stepsSection;
+  thisSection.querySelector('.steps-toggle').addEventListener('click', () => {
+    const toggle = thisSection.querySelector('.steps-toggle');
+    const list = thisSection.querySelector('.steps-list');
     toggle.classList.toggle('expanded');
     list.classList.toggle('visible');
   });

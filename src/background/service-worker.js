@@ -12,7 +12,7 @@ import { getDomainSkills } from './modules/domain-skills.js';
 import {
   loadConfig, getConfig, setConfig,
   createAbortController, abortRequest,
-  callLLM, callLLMSimple, resetApiCallCounter, getApiCallCount
+  callLLM, callLLMSimple, resetApiCallCounter, getApiCallCount, isClaudeProvider
 } from './modules/api.js';
 import { manageMemory, getMemoryStats } from './modules/memory-manager.js';
 import { compactIfNeeded, calculateContextTokens } from './modules/conversation-compaction.js';
@@ -406,7 +406,8 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   });
 
   // Add planning mode reminder if askBeforeActing is enabled AND this is a new conversation
-  if (askBeforeActing && existingHistory.length === 0) {
+  // IMPORTANT: Only add for Claude models - update_plan is Claude-specific and filtered out for other providers
+  if (askBeforeActing && existingHistory.length === 0 && isClaudeProvider()) {
     userContent.push({
       type: 'text',
       text: '<system-reminder>You are in planning mode. Before executing any tools, you must first present a plan to the user using the update_plan tool. The plan should include: domains (list of domains you will visit) and approach (high-level steps you will take).</system-reminder>',

@@ -52,3 +52,6 @@ SPEC-dual-mode.md
 
 # Claude Code
 .claude/
+
+# Internal documentation (not for public release)
+docs/internal/

@@ -1,9 +1,12 @@
 /**
  * System prompt builder for LLM API.
  * Defines the agent's behavior, tool usage, and browser automation instructions.
+ * @param {Object} options - Build options
+ * @param {boolean} [options.isClaudeModel=true] - Whether the target is a Claude model
  */
 
-export function buildSystemPrompt() {
+export function buildSystemPrompt(options = {}) {
+  const { isClaudeModel = true } = options;
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', {
     month: 'numeric',
@@ -14,10 +17,11 @@ export function buildSystemPrompt() {
 
   return [
     // Identity marker (required for Anthropic API with CLI credentials)
-    {
+    // Only include for Claude models
+    ...(isClaudeModel ? [{
       type: 'text',
       text: `You are Claude Code, Anthropic's official CLI for Claude.`,
-    },
+    }] : []),
     // Actual behavior instructions
     {
       type: 'text',
@@ -30,7 +34,7 @@ The current date is ${dateStr}, ${timeStr}.
 
 The assistant avoids over-formatting responses. Keep responses concise and action-oriented.
 The assistant does not use emojis unless asked.
-Do not introduce yourself or mention being Claude Code. Just respond to the user's request directly.
+Do not introduce yourself. Just respond to the user's request directly.
 
 IMPORTANT: Do not ask for permission or confirmation. The user has already given you all the information you need. Just complete the task.
 </behavior_instructions>
@@ -94,7 +98,9 @@ Use the tabs_create tool to create new empty tabs:
 - Tab titles and URLs help you identify which tab to use for specific tasks
 </browser_tabs_usage>`,
     },
-    {
+    // Claude-specific: turn_answer_start instructions
+    // Non-Claude: Direct response instructions
+    isClaudeModel ? {
       type: 'text',
       text: `<turn_answer_start_instructions>
 Before outputting any text response to the user this turn, call turn_answer_start first.
@@ -108,6 +114,25 @@ RULES:
 - NEVER call during intermediate thoughts, reasoning, or while planning to use more tools
 - No more tools after calling this
 </turn_answer_start_instructions>`,
+      cache_control: { type: 'ephemeral' },
+    } : {
+      type: 'text',
+      text: `<response_instructions>
+IMPORTANT: You can respond directly without using any tools.
+
+For simple conversational messages (greetings, questions about yourself, clarifying questions):
+- Respond directly with text - no tools needed
+- Examples: "hi", "hello", "what can you do?", "who are you?"
+
+For browser automation tasks:
+- Use tools to complete the task
+- When done, respond with a summary of what you did
+
+If the current tab is inaccessible (chrome://, about:// pages):
+- Either navigate to a regular website, OR
+- Respond directly explaining the limitation
+- Do NOT repeatedly try to access inaccessible pages
+</response_instructions>`,
       cache_control: { type: 'ephemeral' },
     },
   ];

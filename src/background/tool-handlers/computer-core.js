@@ -51,7 +51,7 @@ async function securityCheck(tabId, originalUrl, actionName) {
 
 /**
  * Get element coordinates from ref
- * Copied from ae() at lines 6516-6576
+ * Resolves element reference to screen coordinates for clicking
  *
  * @param {number} tabId - Tab ID
  * @param {string} ref - Element reference (e.g., "ref_1")
@@ -122,7 +122,6 @@ async function getElementFromRef(tabId, ref) {
 
 /**
  * Get current scroll position
- * Copied from ue() at lines 6689-6701
  *
  * @param {number} tabId - Tab ID
  * @returns {Promise<{x: number, y: number}>}
@@ -143,7 +142,6 @@ async function getScrollPosition(tabId) {
 
 /**
  * Scroll via JavaScript (fallback when CDP scroll doesn't work)
- * Copied from ne() at lines 5700-5732
  *
  * @param {number} tabId - Tab ID
  * @param {number} x - X coordinate
@@ -187,7 +185,7 @@ async function scrollViaJavaScript(tabId, x, y, deltaX, deltaY) {
 
 /**
  * Handle click action
- * Copied from se() at lines 6577-6664
+ * Performs mouse click at specified coordinates with human-like movement
  *
  * @param {number} tabId - Tab ID
  * @param {Object} input - Tool input with coordinate/ref, action, modifiers
@@ -196,6 +194,9 @@ async function scrollViaJavaScript(tabId, x, y, deltaX, deltaY) {
  * @returns {Promise<{output?: string, error?: string}>}
  */
 async function handleClick(tabId, input, clickCount = 1, originalUrl) {
+  // Ensure tab is active before clicking - required for proper focus
+  await chrome.tabs.update(tabId, { active: true });
+
   let x, y;
 
   if (input.ref) {
@@ -269,7 +270,7 @@ async function handleClick(tabId, input, clickCount = 1, originalUrl) {
 
 /**
  * Handle screenshot action
- * Copied from ce() at lines 6665-6688
+ * Captures viewport screenshot with proper DPR handling
  *
  * @param {number} tabId - Tab ID
  * @returns {Promise<{output?: string, base64Image?: string, imageFormat?: string, imageId?: string, error?: string}>}
@@ -298,7 +299,6 @@ async function handleScreenshot(tabId) {
 
 // ============================================================================
 // MAIN COMPUTER TOOL HANDLER
-// Copied from ie.execute at lines 5828-6411
 // ============================================================================
 
 /**
@@ -364,6 +364,9 @@ export async function handleComputer(input) {
           if (secCheck) {
             result = secCheck;
           } else {
+            // Ensure tab is active before typing - required for apps like Google Docs
+            await chrome.tabs.update(tabId, { active: true });
+            await new Promise(resolve => setTimeout(resolve, 100)); // Brief delay for focus
             await cdpHelper.type(tabId, toolInput.text);
             result = { output: `Typed "${toolInput.text}"` };
           }

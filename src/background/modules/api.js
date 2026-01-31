@@ -134,6 +134,15 @@ export function getApiCallCount() {
 }
 
 /**
+ * Check if the current provider is Claude (Anthropic)
+ * Used to conditionally enable Claude-specific features like update_plan
+ */
+export function isClaudeProvider() {
+  const provider = createProvider(config.apiBaseUrl || '', config);
+  return provider.getName() === 'anthropic';
+}
+
+/**
  * Simple LLM API call (for quick tasks like summarization)
  */
 export async function callLLMSimple(prompt, maxTokens = 800) {
@@ -191,7 +200,8 @@ function getNativeHostPort() {
  */
 async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
   const provider = createProvider(config.apiBaseUrl || '', config);
-  const systemPrompt = buildSystemPrompt();
+  const isClaudeModel = provider.getName() === 'anthropic';
+  const systemPrompt = buildSystemPrompt({ isClaudeModel });
   const useStreaming = onTextChunk !== null;
 
   // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
@@ -341,7 +351,8 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
   const provider = createProvider(config.apiBaseUrl || '', config);
   const useStreaming = onTextChunk !== null;
   const signal = abortController?.signal;
-  const systemPrompt = buildSystemPrompt();
+  const isClaudeModel = provider.getName() === 'anthropic';
+  const systemPrompt = buildSystemPrompt({ isClaudeModel });
 
   // Filter tools based on current URL (hides domain-specific tools on non-matching sites)
   // Always use getToolsForUrl to ensure _domains property is stripped (API rejects unknown properties)

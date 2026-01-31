@@ -965,7 +965,7 @@ class CDPHelper {
 
 /**
  * Calculate target dimensions for screenshot resizing
- * Extracted from function X (lines 4554-4584)
+ * Maintains aspect ratio while fitting within max dimensions
  */
 function calculateTargetDimensions(width, height, params) {
   const { pxPerToken, maxTargetPx, maxTargetTokens } = params;

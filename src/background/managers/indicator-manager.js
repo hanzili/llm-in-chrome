@@ -2,8 +2,8 @@
  * Indicator Manager
  * Handles visual agent indicators on tabs
  *
- * Manages visual indicators during tool execution
- * with CDPHelper which calls K.hideIndicatorForToolUse() and K.restoreIndicatorAfterToolUse()
+ * Manages visual indicators during tool execution - hides during
+ * screenshots and restores after to avoid capturing UI artifacts
  */
 
 let indicatorTabId = null;

@@ -7,6 +7,7 @@
  */
 
 import { BaseProvider } from './base-provider.js';
+import { filterClaudeOnlyTools } from '../../../tools/definitions.js';
 
 const NATIVE_HOST_NAME = 'com.llm_in_chrome.oauth_host';
 const CODEX_API_URL = 'https://chatgpt.com/backend-api/codex/responses';
@@ -75,7 +76,7 @@ export class CodexProvider extends BaseProvider {
         stop_reason: 'end_turn',
       };
       let currentText = '';
-      let toolCalls = {};
+      let itemsById = {};  // Track Responses API items by id
 
       try {
         port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
@@ -85,63 +86,73 @@ export class CodexProvider extends BaseProvider {
             // Handle Responses API streaming events
             const event = message.data;
 
-            // Handle different Responses API event types
-            if (event.type === 'response.output_text.delta') {
-              // Text delta
-              const text = event.delta || '';
-              currentText += text;
-              if (onTextChunk) onTextChunk(text);
-
-            } else if (event.type === 'response.function_call_arguments.delta') {
-              // Function call arguments delta
-              const callId = event.call_id || event.item_id;
-              if (!toolCalls[callId]) {
-                toolCalls[callId] = {
-                  id: callId,
-                  name: event.name || '',
-                  arguments: '',
-                };
-              }
-              toolCalls[callId].arguments += event.delta || '';
-
-            } else if (event.type === 'response.output_item.added') {
-              // New output item (could be text or function call)
+            // response.output_item.added - new item (text or function_call)
+            if (event.type === 'response.output_item.added') {
               const item = event.item;
-              if (item?.type === 'function_call') {
-                toolCalls[item.call_id] = {
-                  id: item.call_id,
-                  name: item.name,
+              if (item) {
+                itemsById[item.id] = {
+                  id: item.id,
+                  type: item.type,
+                  call_id: item.call_id,
+                  name: item.name || '',
                   arguments: item.arguments || '',
                 };
               }
 
+            // response.output_item.done - finalized item with complete data
+            } else if (event.type === 'response.output_item.done') {
+              const item = event.item;
+              if (item && item.type === 'function_call') {
+                itemsById[item.id] = {
+                  id: item.id,
+                  type: item.type,
+                  call_id: item.call_id,
+                  name: item.name || '',
+                  arguments: item.arguments || '',
+                };
+              }
+
+            // response.output_text.delta - text streaming
+            } else if (event.type === 'response.output_text.delta') {
+              const text = event.delta || '';
+              currentText += text;
+              if (onTextChunk) onTextChunk(text);
+
+            // response.function_call_arguments.delta - argument fragments
+            } else if (event.type === 'response.function_call_arguments.delta') {
+              const itemId = event.item_id;
+              if (itemId && itemsById[itemId]) {
+                itemsById[itemId].arguments += event.delta || '';
+              }
+
+            // response.function_call_arguments.done - complete arguments
+            } else if (event.type === 'response.function_call_arguments.done') {
+              const itemId = event.item_id;
+              if (itemId && itemsById[itemId]) {
+                itemsById[itemId].arguments = event.arguments || '';
+              }
+
+            // response.completed - final response
             } else if (event.type === 'response.completed') {
-              // Response completed - extract final data
               const response = event.response;
               if (response?.usage) {
                 result.usage = response.usage;
               }
-              // Status from response
               if (response?.status === 'incomplete') {
                 result.stop_reason = 'max_tokens';
               }
-            }
-
-            // Also handle legacy chat completions format (fallback)
-            if (event.choices?.[0]?.delta) {
-              const delta = event.choices[0].delta;
-              if (delta.content) {
-                currentText += delta.content;
-                if (onTextChunk) onTextChunk(delta.content);
-              }
-              if (delta.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  const idx = tc.index || 0;
-                  if (!toolCalls[idx]) {
-                    toolCalls[idx] = { id: tc.id || `call_${idx}`, name: '', arguments: '' };
+              // Extract output items from completed response
+              if (response?.output) {
+                for (const item of response.output) {
+                  if (item.type === 'function_call') {
+                    itemsById[item.id] = {
+                      id: item.id,
+                      type: item.type,
+                      call_id: item.call_id,
+                      name: item.name,
+                      arguments: item.arguments || '',
+                    };
                   }
-                  if (tc.function?.name) toolCalls[idx].name = tc.function.name;
-                  if (tc.function?.arguments) toolCalls[idx].arguments += tc.function.arguments;
                 }
               }
             }
@@ -157,25 +168,30 @@ export class CodexProvider extends BaseProvider {
               result.content.push({ type: 'text', text: currentText });
             }
 
-            // Add tool calls
-            for (const toolCall of Object.values(toolCalls)) {
-              let parsedArgs = {};
-              try {
-                parsedArgs = JSON.parse(toolCall.arguments || '{}');
-              } catch (e) {
-                parsedArgs = {};
-              }
+            // Add function calls from tracked items
+            let hasToolCalls = false;
+            for (const item of Object.values(itemsById)) {
+              // Only include function_call items with a valid name
+              if (item.type === 'function_call' && item.name) {
+                let parsedArgs = {};
+                try {
+                  parsedArgs = JSON.parse(item.arguments || '{}');
+                } catch (e) {
+                  parsedArgs = {};
+                }
 
-              result.content.push({
-                type: 'tool_use',
-                id: toolCall.id,
-                name: toolCall.name,
-                input: parsedArgs,
-              });
+                result.content.push({
+                  type: 'tool_use',
+                  id: item.call_id || item.id,
+                  name: item.name,
+                  input: parsedArgs,
+                });
+                hasToolCalls = true;
+              }
             }
 
             // Set stop reason based on content
-            if (Object.keys(toolCalls).length > 0) {
+            if (hasToolCalls) {
               result.stop_reason = 'tool_use';
             }
 
@@ -319,12 +335,16 @@ export class CodexProvider extends BaseProvider {
 
   /**
    * Convert tools to Responses API format
+   * Filters out Claude-only tools that don't work with OpenAI models
    * @private
    */
   _convertToolsForResponses(anthropicTools) {
     if (!anthropicTools || anthropicTools.length === 0) return [];
 
-    return anthropicTools.map(tool => ({
+    // Filter out Claude-only tools (like turn_answer_start)
+    const filteredTools = filterClaudeOnlyTools(anthropicTools);
+
+    return filteredTools.map(tool => ({
       type: 'function',
       name: tool.name,
       description: tool.description,
@@ -334,44 +354,84 @@ export class CodexProvider extends BaseProvider {
 
   /**
    * Convert Anthropic messages to Responses API "input" format
-   * ccproxy only sends the last user message - Responses API is stateless per request
+   * Converts full conversation history for multi-turn support
    * @private
    */
   _convertToResponsesInput(anthropicMessages) {
-    // Find the last user message (like ccproxy does)
-    let lastUserText = null;
+    const input = [];
 
-    for (let i = anthropicMessages.length - 1; i >= 0; i--) {
-      const msg = anthropicMessages[i];
-      if (msg.role !== 'user') continue;
+    for (const msg of anthropicMessages) {
+      if (msg.role === 'user') {
+        // User message - could be text or tool results
+        if (typeof msg.content === 'string') {
+          input.push({
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: msg.content }],
+          });
+        } else if (Array.isArray(msg.content)) {
+          // Check if it's tool results or regular text
+          const toolResults = msg.content.filter(b => b.type === 'tool_result');
+          const textBlocks = msg.content.filter(b => b.type === 'text');
 
-      if (typeof msg.content === 'string') {
-        lastUserText = msg.content;
-        break;
-      }
+          // Add tool results as function_call_output
+          for (const result of toolResults) {
+            let output = result.content;
+            if (Array.isArray(result.content)) {
+              // Extract text from array content (skip images for now)
+              output = result.content
+                .filter(c => c.type === 'text')
+                .map(c => c.text)
+                .join('\n');
+            }
+            input.push({
+              type: 'function_call_output',
+              call_id: result.tool_use_id,
+              output: typeof output === 'string' ? output : JSON.stringify(output),
+            });
+          }
 
-      if (Array.isArray(msg.content)) {
-        const texts = [];
-        for (const block of msg.content) {
-          if (block.type === 'text' && block.text) {
-            texts.push(block.text);
+          // Add text blocks as user message
+          if (textBlocks.length > 0) {
+            const text = textBlocks.map(b => b.text).join('\n');
+            input.push({
+              type: 'message',
+              role: 'user',
+              content: [{ type: 'input_text', text }],
+            });
           }
         }
-        if (texts.length > 0) {
-          lastUserText = texts.join(' ');
-          break;
+      } else if (msg.role === 'assistant') {
+        // Assistant message - could have text and/or tool calls
+        if (Array.isArray(msg.content)) {
+          const textBlocks = msg.content.filter(b => b.type === 'text');
+          const toolUses = msg.content.filter(b => b.type === 'tool_use');
+
+          // Add text response if present
+          if (textBlocks.length > 0) {
+            const text = textBlocks.map(b => b.text).join('\n');
+            if (text.trim()) {
+              input.push({
+                type: 'message',
+                role: 'assistant',
+                content: [{ type: 'output_text', text }],
+              });
+            }
+          }
+
+          // Add function calls
+          for (const toolUse of toolUses) {
+            input.push({
+              type: 'function_call',
+              call_id: toolUse.id,
+              name: toolUse.name,
+              arguments: JSON.stringify(toolUse.input),
+            });
+          }
         }
       }
     }
 
-    if (lastUserText) {
-      return [{
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: lastUserText }],
-      }];
-    }
-
-    return [];
+    return input;
   }
 }

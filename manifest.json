@@ -38,7 +38,7 @@
   },
 
   "side_panel": {
-    "default_path": "src/sidepanel/sidepanel.html"
+    "default_path": "dist/sidepanel.html"
   },
 
   "background": {

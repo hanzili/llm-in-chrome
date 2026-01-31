@@ -5,6 +5,7 @@
  */
 
 import { BaseProvider } from './base-provider.js';
+import { filterClaudeOnlyTools } from '../../../tools/definitions.js';
 
 export class GoogleProvider extends BaseProvider {
   getName() {
@@ -201,13 +202,17 @@ export class GoogleProvider extends BaseProvider {
   /**
    * Convert Anthropic tools to Google format
    * Google uses a subset of JSON Schema - need to sanitize
+   * Filters out Claude-only tools that don't work with non-Claude models
    * @private
    */
   _convertTools(anthropicTools) {
     if (!anthropicTools || anthropicTools.length === 0) return [];
 
+    // Filter out Claude-only tools (like turn_answer_start)
+    const filteredTools = filterClaudeOnlyTools(anthropicTools);
+
     return [{
-      functionDeclarations: anthropicTools.map(tool => {
+      functionDeclarations: filteredTools.map(tool => {
         // Clean the schema for Google - remove unsupported fields
         const cleanSchema = this._sanitizeSchema(tool.input_schema);
 

@@ -4,6 +4,7 @@
  */
 
 import { BaseProvider } from './base-provider.js';
+import { filterClaudeOnlyTools } from '../../../tools/definitions.js';
 
 export class OpenAIProvider extends BaseProvider {
   getName() {
@@ -274,12 +275,16 @@ export class OpenAIProvider extends BaseProvider {
 
   /**
    * Convert Anthropic tools to OpenAI format
+   * Filters out Claude-only tools that don't work with OpenAI models
    * @private
    */
   _convertTools(anthropicTools) {
     if (!anthropicTools || anthropicTools.length === 0) return [];
 
-    return anthropicTools.map(tool => ({
+    // Filter out Claude-only tools (like turn_answer_start, update_plan)
+    const filteredTools = filterClaudeOnlyTools(anthropicTools);
+
+    return filteredTools.map(tool => ({
       type: 'function',
       function: {
         name: tool.name,
