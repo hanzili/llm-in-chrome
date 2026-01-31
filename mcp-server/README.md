@@ -65,6 +65,27 @@ browser_message(session, "Put $150k")
 browser_status(session) → { status: "running", step: "Completing remaining fields..." }
 ```
 
+## Session Continuation
+
+Continue working with completed tasks - the agent retains full memory:
+
+```
+session = browser_start("Go to LinkedIn and find an AI Engineer job in Montreal")
+
+# Wait for completion...
+browser_status(session) → { status: "complete", answer: "Found: Applied AI Engineer at Cohere" }
+
+# Continue with the same session - agent remembers everything
+browser_message(session, "Click into that job and tell me the requirements")
+
+browser_status(session) → { status: "complete", answer: "Requirements: 3+ years Python..." }
+
+# Keep going
+browser_message(session, "Now apply to this job using my profile")
+```
+
+Each session has isolated memory, so parallel tasks don't interfere with each other.
+
 ## Installation
 
 ### 1. Install the Chrome Extension

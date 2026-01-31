@@ -17,6 +17,7 @@ Shows the agent applying to jobs, unsubscribing from emails in Gmail, and comple
 - **Form Handling**: Fill forms and upload files
 - **Console/Network Monitoring**: Track page logs and network requests
 - **Multi-Provider Support**: Works with Anthropic, OpenAI, Google, and OpenRouter
+- **MCP Server**: Integrate with Claude Code for high-level task automation
 
 ## Installation
 
@@ -155,6 +156,50 @@ Alternatively, use API keys for pay-per-use billing:
 | `javascript_tool` | Execute JavaScript on pages |
 | `read_console_messages` | Get browser console logs |
 | `read_network_requests` | Get network request history |
+
+## MCP Server Integration
+
+Use the browser agent as a tool in Claude Code for high-level task automation.
+
+### Setup
+
+```bash
+cd mcp-server
+npm install && npm run build
+```
+
+Add to `~/.claude/claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "node",
+      "args": ["/path/to/llm-in-chrome/mcp-server/dist/index.js"]
+    }
+  }
+}
+```
+
+### Usage
+
+```
+# Start a task
+browser_start("Log into my bank and download last month's statement")
+
+# Check progress
+browser_status(session_id) → { status: "running", steps: [...] }
+
+# Continue after completion
+browser_message(session_id, "Now download the one from two months ago")
+```
+
+**Features:**
+- **Task-level abstraction**: Delegate entire workflows, not individual clicks
+- **Session continuation**: Send follow-up messages to completed tasks
+- **Parallel execution**: Run multiple tasks simultaneously with isolated memory
+- **Progress monitoring**: Track steps and intervene if needed
+
+See [mcp-server/README.md](mcp-server/README.md) for full documentation.
 
 ## Contributing
 

@@ -100,6 +100,7 @@ export async function clearLog() {
  * @param {string} [taskData.endTime] - ISO timestamp when task ended
  * @param {Array<Object>} [taskData.messages] - Agent messages for this task
  * @param {string} [taskData.error] - Error message if task failed
+ * @param {Object} [taskData.usage] - Token usage for this task
  * @param {Array<string>} [screenshots] - Array of screenshot data URLs
  * @returns {Promise<void>}
  */
@@ -117,6 +118,7 @@ export async function saveTaskLogs(taskData, screenshots = []) {
       duration: taskData.startTime && taskData.endTime
         ? `${((new Date(taskData.endTime) - new Date(taskData.startTime)) / 1000).toFixed(1)}s`
         : null,
+      usage: taskData.usage || null,
       turns: buildCleanTurns(taskData.messages || []),
       screenshots: screenshots.map((_, i) => `screenshot_${i + 1}.png`),
       debug: taskDebugLog, // Include all logs for debugging (removed filter)
