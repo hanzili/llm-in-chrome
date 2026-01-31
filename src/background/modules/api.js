@@ -143,22 +143,77 @@ export function isClaudeProvider() {
 }
 
 /**
- * Simple LLM API call (for quick tasks like summarization)
+ * Simple LLM API call (for quick tasks like summarization, find tool, etc.)
+ * Supports two call signatures:
+ * 1. callLLMSimple(prompt, maxTokens) - simple string prompt
+ * 2. callLLMSimple({ messages, maxTokens }) - full messages array
+ *
+ * Returns the full API response when using messages array, or just text when using string prompt.
  */
-export async function callLLMSimple(prompt, maxTokens = 800) {
+export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   await loadConfig();
-  const headers = await getApiHeaders();
-  const response = await fetch(config.apiBaseUrl, {
-    method: 'POST',
-    headers: headers,
-    body: JSON.stringify({
-      model: 'claude-3-5-haiku-20241022',
-      max_tokens: maxTokens,
-      messages: [{ role: 'user', content: prompt }],
-    }),
-  });
+
+  // Support both call signatures
+  let messages;
+  let maxTokens;
+  let returnFullResponse = false;
+
+  if (typeof promptOrOptions === 'object' && promptOrOptions.messages) {
+    // New signature: { messages, maxTokens }
+    messages = promptOrOptions.messages;
+    maxTokens = promptOrOptions.maxTokens || 800;
+    returnFullResponse = true;
+  } else {
+    // Legacy signature: (prompt, maxTokens)
+    messages = [{ role: 'user', content: promptOrOptions }];
+    maxTokens = maxTokensArg;
+  }
+
+  const makeRequest = async (headers) => {
+    const response = await fetch(config.apiBaseUrl, {
+      method: 'POST',
+      headers: headers,
+      body: JSON.stringify({
+        model: 'claude-3-5-haiku-20241022',
+        max_tokens: maxTokens,
+        messages: messages,
+      }),
+    });
+    return response;
+  };
+
+  let headers = await getApiHeaders();
+  let response = await makeRequest(headers);
+
+  // Handle 401 - try refreshing OAuth token and retry once
+  if (response.status === 401 && config.authMethod === 'oauth') {
+    console.log('[API] callLLMSimple got 401, attempting token refresh...');
+    try {
+      const { refreshAccessToken } = await import('./oauth-manager.js');
+      const tokens = await refreshAccessToken();
+      if (tokens) {
+        // Save the new tokens
+        await chrome.storage.local.set({
+          oauthAccessToken: tokens.accessToken,
+          oauthRefreshToken: tokens.refreshToken,
+          oauthExpiresAt: Date.now() + (tokens.expiresIn * 1000)
+        });
+        headers = await getApiHeaders(); // Get fresh headers with new token
+        response = await makeRequest(headers);
+      }
+    } catch (refreshError) {
+      console.error('[API] Token refresh failed:', refreshError);
+    }
+  }
+
   if (!response.ok) throw new Error(`API error: ${response.status}`);
+
   const result = await response.json();
+
+  // Return full response for messages-based calls, just text for simple prompts
+  if (returnFullResponse) {
+    return result;
+  }
   return result.content?.find(b => b.type === 'text')?.text || '';
 }
 
@@ -382,21 +437,44 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
 
   // Combine user abort signal with timeout
   const combinedSignal = signal || timeoutController.signal;
+  const requestBodyStr = JSON.stringify(requestBody);
+
+  const makeRequest = async (headers) => {
+    return await fetch(apiUrl, {
+      method: 'POST',
+      headers: headers,
+      body: requestBodyStr,
+      signal: combinedSignal,
+    });
+  };
 
   try {
     apiCallCounter++;
     const callNumber = apiCallCounter;
     const startTime = Date.now();
 
-    const requestBodyStr = JSON.stringify(requestBody);
+    let headers = await getApiHeaders();
+    let response = await makeRequest(headers);
 
-    const headers = await getApiHeaders();
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: headers,
-      body: requestBodyStr,
-      signal: combinedSignal,
-    });
+    // Handle 401 - try refreshing OAuth token and retry once
+    if (response.status === 401 && config.authMethod === 'oauth') {
+      console.log('[API] callLLM got 401, attempting token refresh...');
+      try {
+        const { refreshAccessToken } = await import('./oauth-manager.js');
+        const tokens = await refreshAccessToken();
+        if (tokens) {
+          await chrome.storage.local.set({
+            oauthAccessToken: tokens.accessToken,
+            oauthRefreshToken: tokens.refreshToken,
+            oauthExpiresAt: Date.now() + (tokens.expiresIn * 1000)
+          });
+          headers = await getApiHeaders();
+          response = await makeRequest(headers);
+        }
+      } catch (refreshError) {
+        console.error('[API] Token refresh failed:', refreshError);
+      }
+    }
 
     clearTimeout(timeoutId);
 

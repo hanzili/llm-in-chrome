@@ -3,7 +3,6 @@ import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 export function useChat() {
   const [messages, setMessages] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
-  const [askBeforeActing] = useState(false); // Always execute directly
   const [attachedImages, setAttachedImages] = useState([]);
   const [sessionTabGroupId, setSessionTabGroupId] = useState(null);
   const [pendingPlan, setPendingPlan] = useState(null);
@@ -171,7 +170,7 @@ export function useChat() {
         payload: {
           tabId: tab.id,
           task: text,
-          askBeforeActing,
+          askBeforeActing: false,
           images: imagesToSend,
           tabGroupId: sessionTabGroupId,
         },
@@ -184,7 +183,7 @@ export function useChat() {
       }]);
       setIsRunning(false);
     }
-  }, [isRunning, attachedImages, askBeforeActing, sessionTabGroupId]);
+  }, [isRunning, attachedImages, sessionTabGroupId]);
 
   const stopTask = useCallback(() => {
     chrome.runtime.sendMessage({ type: 'STOP_TASK' }).catch(() => {});

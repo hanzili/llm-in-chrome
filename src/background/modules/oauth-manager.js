@@ -436,10 +436,20 @@ export async function getAccessToken() {
 /**
  * Refresh access token using refresh token
  *
- * @param {string} refreshToken - Refresh token
- * @returns {Promise<Object>} New token data
+ * @param {string} refreshToken - Refresh token (optional - will fetch from storage if not provided)
+ * @returns {Promise<Object|null>} New token data or null if refresh failed
  */
-async function refreshAccessToken(refreshToken) {
+export async function refreshAccessToken(refreshToken = null) {
+  // If no refresh token provided, get from storage
+  if (!refreshToken) {
+    const stored = await chrome.storage.local.get(['oauthRefreshToken']);
+    refreshToken = stored.oauthRefreshToken;
+    if (!refreshToken) {
+      console.error('No refresh token available');
+      return null;
+    }
+  }
+
   const body = {
     grant_type: 'refresh_token',
     refresh_token: refreshToken

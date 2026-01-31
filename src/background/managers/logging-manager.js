@@ -21,6 +21,42 @@ export function initLogging(debugLogRef) {
 }
 
 /**
+ * Sanitize data for logging - strip base64 images and long binary-looking strings
+ * @param {*} data - Data to sanitize
+ * @returns {*} Sanitized data safe for logging
+ */
+function sanitizeForLogging(data) {
+  if (!data) return data;
+  if (typeof data === 'string') {
+    // Strip base64 data URLs
+    if (data.startsWith('data:image/')) {
+      return '[base64 image stripped]';
+    }
+    // Strip long strings that look like base64 (>500 chars, mostly alphanumeric)
+    if (data.length > 500 && /^[A-Za-z0-9+/=]+$/.test(data.substring(0, 100))) {
+      return `[base64 data stripped, ${data.length} chars]`;
+    }
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map(sanitizeForLogging);
+  }
+  if (typeof data === 'object') {
+    const sanitized = {};
+    for (const [key, value] of Object.entries(data)) {
+      // Skip known base64 fields
+      if (key === 'base64Image' || key === 'base64' || key === 'data' && typeof value === 'string' && value.length > 1000) {
+        sanitized[key] = `[stripped, ${typeof value === 'string' ? value.length : 'N/A'} chars]`;
+      } else {
+        sanitized[key] = sanitizeForLogging(value);
+      }
+    }
+    return sanitized;
+  }
+  return data;
+}
+
+/**
  * Log a message to console and storage
  * @param {string} type - Log type (e.g., 'ERROR', 'TOOL', 'DEBUGGER', 'CLICK', 'DPR')
  * @param {string} message - Log message
@@ -28,11 +64,12 @@ export function initLogging(debugLogRef) {
  * @returns {Promise<void>}
  */
 export async function log(type, message, data = null) {
+  const sanitizedData = sanitizeForLogging(data);
   const entry = {
     time: new Date().toISOString(),
     type,
     message,
-    data: data ? JSON.stringify(data).substring(0, LIMITS.LOG_DATA_CHARS) : null,
+    data: sanitizedData ? JSON.stringify(sanitizedData).substring(0, LIMITS.LOG_DATA_CHARS) : null,
   };
   console.log(`[${type}] ${message}`, data || '');
 
@@ -158,9 +195,11 @@ export function buildCleanTurns(messages) {
               const hasImage = item.content.some(c => c.type === 'image');
               tool.result = textParts.join('\n') + (hasImage ? ' [+screenshot]' : '');
             } else {
-              tool.result = typeof item.content === 'string'
-                ? item.content.substring(0, LIMITS.CLEAN_TURN_CONTENT) // Truncate long results
-                : JSON.stringify(item.content).substring(0, LIMITS.CLEAN_TURN_CONTENT);
+              // Sanitize and truncate non-array content
+              const sanitized = sanitizeForLogging(item.content);
+              tool.result = typeof sanitized === 'string'
+                ? sanitized.substring(0, LIMITS.CLEAN_TURN_CONTENT)
+                : JSON.stringify(sanitized).substring(0, LIMITS.CLEAN_TURN_CONTENT);
             }
           }
         }

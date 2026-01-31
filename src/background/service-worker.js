@@ -23,6 +23,9 @@ import { log, clearLog, saveTaskLogs, initLogging } from './managers/logging-man
 import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking } from './managers/debugger-manager.js';
 import { showAgentIndicators, hideAgentIndicators, hideIndicatorsForToolUse, showIndicatorsAfterToolUse } from './managers/indicator-manager.js';
 import { ensureTabGroup, addTabToGroup, validateTabInGroup, isTabManagedByAgent, registerTabCleanupListener, initTabManager } from './managers/tab-manager.js';
+import {
+  initMcpBridge, startMcpPolling, sendMcpUpdate, sendMcpComplete, sendMcpError, sendMcpScreenshot, isMcpSession
+} from './modules/mcp-bridge.js';
 
 // ============================================
 // STATE
@@ -476,11 +479,13 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
 
     const toolUses = response.content.filter(b => b.type === 'tool_use');
 
+    // Always send any text content as a message (even if there are also tool uses)
+    const textBlock = response.content.find(b => b.type === 'text');
+    if (textBlock) {
+      onUpdate({ step: steps, status: 'message', text: textBlock.text });
+    }
+
     if (toolUses.length === 0) {
-      const textBlock = response.content.find(b => b.type === 'text');
-      if (textBlock) {
-        onUpdate({ step: steps, status: 'message', text: textBlock.text });
-      }
       if (response.stop_reason === 'end_turn') {
         return { success: true, message: 'Task completed', messages, steps };
       }
@@ -494,20 +499,27 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
       const result = await executeTool(toolUse.name, toolUse.input, sessionTabGroupId);
 
       // Log structured tool result
-      const isScreenshot = result && result.type === 'screenshot';
+      const isScreenshot = result && result.base64Image;
       const isError = result?.error || (typeof result === 'string' && result.includes('Error:'));
+
+      // For logging, strip base64 data from result object
+      const safeResult = isScreenshot ? {
+        output: result.output,
+        imageId: result.imageId,
+        imageFormat: result.imageFormat,
+      } : result;
 
       await log('TOOL_RESULT', `Result from ${toolUse.name}`, {
         tool: toolUse.name,
         toolUseId: toolUse.id,
         success: !isError,
         resultType: isScreenshot ? 'screenshot' : typeof result,
-        // For screenshots, reference the file
-        screenshot: isScreenshot ? `screenshot_${screenshotCounter.value}.png` : null,
+        // For screenshots, reference the file (use taskScreenshots.length as counter)
+        screenshot: isScreenshot ? `screenshot_${taskScreenshots.length + 1}.png` : null,
         // For text results, include full content
-        textResult: typeof result === 'string' && !isScreenshot ? result : null,
-        // For object results (not screenshots), include structure
-        objectResult: typeof result === 'object' && !isScreenshot ? result : null,
+        textResult: typeof result === 'string' ? result : null,
+        // For object results (not screenshots), include structure without base64
+        objectResult: typeof result === 'object' && !isScreenshot ? result : (isScreenshot ? safeResult : null),
         // Error info
         error: isError ? (typeof result === 'string' ? result : result.error) : null
       });
@@ -524,6 +536,11 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
       if (result && result.base64Image) {
         const mediaType = result.imageFormat === 'jpeg' ? 'image/jpeg' : 'image/png';
         await log('SCREENSHOT_API', `Sending to API: ${result.base64Image.length} chars, format=${result.imageFormat}`);
+
+        // Save screenshot for logging as separate file
+        const dataUrl = `data:${mediaType};base64,${result.base64Image}`;
+        taskScreenshots.push(dataUrl);
+
         // Include the actual output message if present (e.g., "Scrolled down by 5 ticks at (x, y)")
         // Fall back to generic screenshot message if no output
         const textMessage = result.output || (result.imageId ? `Screenshot captured (ID: ${result.imageId})` : 'Screenshot captured');
@@ -854,4 +871,202 @@ chrome.action.onClicked.addListener(async (tab) => {
 // Set side panel behavior
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
+// ============================================
+// MCP BRIDGE INTEGRATION
+// ============================================
+
+// Track active MCP task sessions
+const activeMcpTasks = new Map(); // sessionId -> { tabId, task }
+
+/**
+ * Start a task from MCP server
+ */
+async function handleMcpStartTask(sessionId, task, url) {
+  console.log(`[MCP] Starting task: ${sessionId}`, { task, url });
+
+  try {
+    // Get or create a tab for this task
+    let tabId;
+    if (url) {
+      // Create new tab with the URL
+      const tab = await chrome.tabs.create({ url, active: true });
+      tabId = tab.id;
+      // Wait for page to load
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    } else {
+      // Use the current active tab
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!activeTab) {
+        sendMcpError(sessionId, 'No active tab found');
+        return;
+      }
+      tabId = activeTab.id;
+    }
+
+    activeMcpTasks.set(sessionId, { tabId, task });
+
+    // Start the task (similar to START_TASK handler but with MCP updates)
+    await startMcpTaskInternal(sessionId, tabId, task);
+  } catch (error) {
+    console.error(`[MCP] Task start error:`, error);
+    sendMcpError(sessionId, error.message);
+  }
+}
+
+/**
+ * Internal MCP task execution
+ */
+async function startMcpTaskInternal(sessionId, tabId, task) {
+  // Reset state for new task
+  agentOpenedTabs.clear();
+  agentSessionActive = true;
+  askBeforeActing = false; // MCP tasks run without asking
+  taskCancelled = false;
+  taskScreenshots = [];
+  taskDebugLog = [];
+  resetApiCallCounter();
+
+  createAbortController();
+  const startTime = new Date().toISOString();
+  currentTask = { tabId, task, status: 'running', steps: [], startTime, mcpSessionId: sessionId };
+
+  await showAgentIndicators(tabId);
+
+  try {
+    const result = await runAgentLoop(tabId, task, update => {
+      currentTask.steps.push(update);
+
+      // Send update to MCP server
+      if (update.status === 'thinking' || update.status === 'tool_use') {
+        sendMcpUpdate(sessionId, 'running', update.text || update.status);
+      } else if (update.status === 'message') {
+        sendMcpUpdate(sessionId, 'running', update.text);
+      }
+
+      // Also send to sidepanel if open
+      chrome.runtime.sendMessage({ type: 'TASK_UPDATE', update }).catch(() => {});
+    }, [], false, conversationHistory, null);
+
+    if (result.messages) {
+      conversationHistory = result.messages;
+    }
+
+    await detachDebugger();
+    agentSessionActive = false;
+    currentTask.status = result.success ? 'completed' : 'failed';
+    currentTask.result = result;
+    currentTask.endTime = new Date().toISOString();
+
+    await hideAgentIndicators(tabId);
+    activeMcpTasks.delete(sessionId);
+
+    // Send completion to MCP server
+    sendMcpComplete(sessionId, {
+      success: result.success,
+      message: result.message,
+      steps: currentTask.steps.length
+    });
+
+  } catch (error) {
+    await detachDebugger();
+    agentSessionActive = false;
+    await hideAgentIndicators(tabId);
+    activeMcpTasks.delete(sessionId);
+
+    const isCancelled = error.name === 'AbortError' || taskCancelled;
+
+    if (isCancelled) {
+      sendMcpComplete(sessionId, { success: false, message: 'Task stopped by user' });
+    } else {
+      sendMcpError(sessionId, error.message);
+    }
+  }
+}
+
+/**
+ * Send follow-up message to running MCP task
+ */
+function handleMcpSendMessage(sessionId, message) {
+  console.log(`[MCP] Follow-up message for ${sessionId}:`, message);
+
+  if (!activeMcpTasks.has(sessionId)) {
+    console.warn(`[MCP] Session not found: ${sessionId}`);
+    return;
+  }
+
+  // For now, append to conversation history
+  // The agent will see this in the next turn
+  conversationHistory.push({
+    role: 'user',
+    content: message
+  });
+
+  sendMcpUpdate(sessionId, 'running', 'Message received, continuing...');
+}
+
+/**
+ * Stop an MCP task
+ */
+function handleMcpStopTask(sessionId) {
+  console.log(`[MCP] Stopping task: ${sessionId}`);
+
+  if (!activeMcpTasks.has(sessionId)) {
+    console.warn(`[MCP] Session not found: ${sessionId}`);
+    return;
+  }
+
+  taskCancelled = true;
+  abortRequest();
+
+  if (pendingPlanResolve) {
+    pendingPlanResolve({ approved: false });
+    pendingPlanResolve = null;
+  }
+}
+
+/**
+ * Take screenshot for MCP session
+ */
+async function handleMcpScreenshot(sessionId) {
+  console.log(`[MCP] Screenshot request for session: ${sessionId}`);
+
+  try {
+    let tabId;
+
+    if (sessionId && activeMcpTasks.has(sessionId)) {
+      tabId = activeMcpTasks.get(sessionId).tabId;
+    } else {
+      // Use current active tab
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!activeTab) {
+        console.warn('[MCP] No active tab for screenshot');
+        return;
+      }
+      tabId = activeTab.id;
+    }
+
+    await ensureDebugger(tabId);
+    const screenshot = await sendDebuggerCommand(tabId, 'Page.captureScreenshot', {
+      format: 'png',
+      quality: 80
+    });
+
+    sendMcpScreenshot(sessionId, screenshot.data);
+  } catch (error) {
+    console.error('[MCP] Screenshot error:', error);
+  }
+}
+
+// Initialize MCP bridge with callbacks
+initMcpBridge({
+  onStartTask: handleMcpStartTask,
+  onSendMessage: handleMcpSendMessage,
+  onStopTask: handleMcpStopTask,
+  onScreenshot: handleMcpScreenshot
+});
+
+// Start polling for MCP commands
+startMcpPolling();
+
 console.log('[LLM in Chrome] Service worker loaded');
+console.log('[LLM in Chrome] MCP bridge initialized');

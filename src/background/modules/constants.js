@@ -17,7 +17,7 @@ export const RETRIES = {
 };
 
 export const LIMITS = {
-  LOG_DATA_CHARS: 100000, // 100KB for detailed debugging (logs metadata for images, full text for reasoning)
+  LOG_DATA_CHARS: 2000, // Keep debug entries small - screenshots saved as separate files
   LOG_ENTRIES: 200,
   CLEAN_TURN_CONTENT: 2000,
   PAGE_TEXT_CHARS: 50000,

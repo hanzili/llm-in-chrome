@@ -1,20 +1,39 @@
 #!/usr/bin/env node
 /**
  * Native Messaging Host for LLM in Chrome
- * - Reads Claude CLI credentials from ~/.claude/.credentials.json
- * - Proxies API calls to Anthropic (bypasses CORS)
- * - Auto-refreshes expired OAuth tokens
+ *
+ * This serves as a bridge between:
+ * 1. Chrome Extension (via native messaging)
+ * 2. MCP Server (via file-based IPC)
+ * 3. Claude/Codex APIs (for OAuth proxy)
+ *
+ * File-based IPC for MCP:
+ * - MCP writes to: ~/.llm-in-chrome/mcp-inbox.json
+ * - Extension reads from inbox, writes to: ~/.llm-in-chrome/mcp-outbox.json
+ * - MCP reads from outbox
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const https = require('https');
 
-// OAuth configuration (same as oauth-manager.js)
+// OAuth configuration
 const OAUTH_CONFIG = {
   tokenUrl: 'https://console.anthropic.com/v1/oauth/token',
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
 };
+
+// MCP IPC paths
+const MCP_DIR = path.join(os.homedir(), '.llm-in-chrome');
+const MCP_INBOX = path.join(MCP_DIR, 'mcp-inbox.json');   // MCP server writes here
+const MCP_OUTBOX = path.join(MCP_DIR, 'mcp-outbox.json'); // Extension writes here
+
+// Ensure MCP directory exists
+try {
+  if (!fs.existsSync(MCP_DIR)) {
+    fs.mkdirSync(MCP_DIR, { recursive: true });
+  }
+} catch (e) {}
 
 // Log to file for debugging
 const logFile = path.join(os.tmpdir(), 'llm-chrome-native-host.log');
@@ -345,6 +364,93 @@ async function proxyApiCall(data, isRetry = false) {
   }
 }
 
+// ============================================
+// MCP FILE-BASED IPC FUNCTIONS
+// ============================================
+
+/**
+ * Write command to MCP inbox (for MCP server to send to extension)
+ */
+function writeMcpInbox(command) {
+  try {
+    // Read existing inbox
+    let inbox = [];
+    if (fs.existsSync(MCP_INBOX)) {
+      try {
+        inbox = JSON.parse(fs.readFileSync(MCP_INBOX, 'utf8'));
+        if (!Array.isArray(inbox)) inbox = [];
+      } catch (e) {
+        inbox = [];
+      }
+    }
+    // Add new command
+    inbox.push({ ...command, timestamp: Date.now() });
+    fs.writeFileSync(MCP_INBOX, JSON.stringify(inbox, null, 2));
+    log(`MCP inbox: wrote ${command.type} (${inbox.length} pending)`);
+    return true;
+  } catch (e) {
+    log(`MCP inbox write error: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Read and clear MCP inbox (for extension to read commands)
+ */
+function readMcpInbox() {
+  try {
+    if (!fs.existsSync(MCP_INBOX)) return [];
+    const inbox = JSON.parse(fs.readFileSync(MCP_INBOX, 'utf8'));
+    // Clear inbox after reading
+    fs.writeFileSync(MCP_INBOX, '[]');
+    log(`MCP inbox: read ${inbox.length} commands`);
+    return Array.isArray(inbox) ? inbox : [];
+  } catch (e) {
+    log(`MCP inbox read error: ${e.message}`);
+    return [];
+  }
+}
+
+/**
+ * Write result to MCP outbox (for extension to send to MCP server)
+ */
+function writeMcpOutbox(result) {
+  try {
+    let outbox = [];
+    if (fs.existsSync(MCP_OUTBOX)) {
+      try {
+        outbox = JSON.parse(fs.readFileSync(MCP_OUTBOX, 'utf8'));
+        if (!Array.isArray(outbox)) outbox = [];
+      } catch (e) {
+        outbox = [];
+      }
+    }
+    outbox.push({ ...result, timestamp: Date.now() });
+    fs.writeFileSync(MCP_OUTBOX, JSON.stringify(outbox, null, 2));
+    log(`MCP outbox: wrote ${result.type} (${outbox.length} pending)`);
+    return true;
+  } catch (e) {
+    log(`MCP outbox write error: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Read and clear MCP outbox (for MCP server to read results)
+ */
+function readMcpOutbox() {
+  try {
+    if (!fs.existsSync(MCP_OUTBOX)) return [];
+    const outbox = JSON.parse(fs.readFileSync(MCP_OUTBOX, 'utf8'));
+    fs.writeFileSync(MCP_OUTBOX, '[]');
+    log(`MCP outbox: read ${outbox.length} results`);
+    return Array.isArray(outbox) ? outbox : [];
+  } catch (e) {
+    log(`MCP outbox read error: ${e.message}`);
+    return [];
+  }
+}
+
 // Handle incoming messages
 function handleMessage(msg) {
   log(`Message: ${msg.type}`);
@@ -352,6 +458,116 @@ function handleMessage(msg) {
   switch (msg.type) {
     case 'ping':
       send({ type: 'pong' });
+      break;
+
+    // ============================================
+    // MCP SERVER COMMANDS (from MCP server via stdin)
+    // Write to inbox for extension to pick up
+    // ============================================
+
+    case 'mcp_start_task':
+      log(`MCP: Queuing task: ${msg.task?.substring(0, 50)}...`);
+      writeMcpInbox({
+        type: 'start_task',
+        sessionId: msg.sessionId,
+        task: msg.task,
+        url: msg.url,
+      });
+      send({ type: 'task_queued', sessionId: msg.sessionId });
+      break;
+
+    case 'mcp_send_message':
+      log(`MCP: Queuing message for session ${msg.sessionId}`);
+      writeMcpInbox({
+        type: 'send_message',
+        sessionId: msg.sessionId,
+        message: msg.message,
+      });
+      send({ type: 'message_queued', sessionId: msg.sessionId });
+      break;
+
+    case 'mcp_stop_task':
+      log(`MCP: Queuing stop for session ${msg.sessionId}`);
+      writeMcpInbox({
+        type: 'stop_task',
+        sessionId: msg.sessionId,
+      });
+      send({ type: 'stop_queued', sessionId: msg.sessionId });
+      break;
+
+    case 'mcp_screenshot':
+      log(`MCP: Queuing screenshot for session ${msg.sessionId || 'active'}`);
+      writeMcpInbox({
+        type: 'screenshot',
+        sessionId: msg.sessionId,
+      });
+      send({ type: 'screenshot_queued' });
+      break;
+
+    case 'mcp_poll_results':
+      // MCP server polling for results from extension
+      const results = readMcpOutbox();
+      send({ type: 'mcp_results', results });
+      break;
+
+    // ============================================
+    // EXTENSION COMMANDS (from Chrome extension via native messaging)
+    // Read from inbox, write results to outbox
+    // ============================================
+
+    case 'poll_mcp_inbox':
+      // Extension checking for MCP commands
+      const commands = readMcpInbox();
+      if (commands.length > 0) {
+        send({ type: 'mcp_commands', commands });
+      } else {
+        send({ type: 'no_commands' });
+      }
+      break;
+
+    case 'mcp_task_update':
+      // Extension sending task progress
+      log(`MCP: Task update for ${msg.sessionId}: ${msg.status}`);
+      writeMcpOutbox({
+        type: 'task_update',
+        sessionId: msg.sessionId,
+        status: msg.status,
+        step: msg.step,
+      });
+      send({ type: 'update_recorded' });
+      break;
+
+    case 'mcp_task_complete':
+      // Extension sending task completion
+      log(`MCP: Task complete for ${msg.sessionId}`);
+      writeMcpOutbox({
+        type: 'task_complete',
+        sessionId: msg.sessionId,
+        result: msg.result,
+      });
+      send({ type: 'complete_recorded' });
+      break;
+
+    case 'mcp_task_error':
+      // Extension sending task error
+      log(`MCP: Task error for ${msg.sessionId}: ${msg.error}`);
+      writeMcpOutbox({
+        type: 'task_error',
+        sessionId: msg.sessionId,
+        error: msg.error,
+      });
+      send({ type: 'error_recorded' });
+      break;
+
+    case 'mcp_screenshot_result':
+      // Extension sending screenshot
+      log(`MCP: Screenshot captured`);
+      writeMcpOutbox({
+        type: 'screenshot',
+        sessionId: msg.sessionId,
+        data: msg.data,
+      });
+      send({ type: 'screenshot_recorded' });
       break;
 
     case 'read_cli_credentials':
