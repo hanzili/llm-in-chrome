@@ -129,7 +129,7 @@ export function useConfig() {
 
   const saveConfig = useCallback(async () => {
     await chrome.runtime.sendMessage({
-      type: 'SET_CONFIG',
+      type: 'SAVE_CONFIG',
       payload: {
         providerKeys,
         customModels,
@@ -144,7 +144,7 @@ export function useConfig() {
     const model = availableModels[index];
     if (model) {
       await chrome.runtime.sendMessage({
-        type: 'SET_CONFIG',
+        type: 'SAVE_CONFIG',
         payload: {
           currentModelIndex: index,
           model: model.modelId,
@@ -193,7 +193,7 @@ export function useConfig() {
   }, [loadConfig]);
 
   const logoutCLI = useCallback(async () => {
-    await chrome.runtime.sendMessage({ type: 'LOGOUT' });
+    await chrome.runtime.sendMessage({ type: 'OAUTH_LOGOUT' });
     await loadConfig();
   }, [loadConfig]);
 
@@ -206,7 +206,7 @@ export function useConfig() {
   }, [loadConfig]);
 
   const logoutCodex = useCallback(async () => {
-    await chrome.runtime.sendMessage({ type: 'LOGOUT_CODEX' });
+    await chrome.runtime.sendMessage({ type: 'CODEX_LOGOUT' });
     await loadConfig();
   }, [loadConfig]);
 

@@ -195,7 +195,7 @@ export function useChat() {
     setStreamingMessageId(null);
     streamingTextRef.current = '';
     setSessionTabGroupId(null);
-    chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'CLEAR_CONVERSATION' }).catch(() => {});
   }, []);
 
   const approvePlan = useCallback(() => {

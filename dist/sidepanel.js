@@ -568,7 +568,7 @@ function useConfig() {
   }, []);
   const saveConfig = q(async () => {
     await chrome.runtime.sendMessage({
-      type: "SET_CONFIG",
+      type: "SAVE_CONFIG",
       payload: {
         providerKeys,
         customModels,
@@ -582,7 +582,7 @@ function useConfig() {
     const model = availableModels[index];
     if (model) {
       await chrome.runtime.sendMessage({
-        type: "SET_CONFIG",
+        type: "SAVE_CONFIG",
         payload: {
           currentModelIndex: index,
           model: model.modelId,
@@ -624,7 +624,7 @@ function useConfig() {
     return result;
   }, [loadConfig]);
   const logoutCLI = q(async () => {
-    await chrome.runtime.sendMessage({ type: "LOGOUT" });
+    await chrome.runtime.sendMessage({ type: "OAUTH_LOGOUT" });
     await loadConfig();
   }, [loadConfig]);
   const importCodex = q(async () => {
@@ -635,7 +635,7 @@ function useConfig() {
     return result;
   }, [loadConfig]);
   const logoutCodex = q(async () => {
-    await chrome.runtime.sendMessage({ type: "LOGOUT_CODEX" });
+    await chrome.runtime.sendMessage({ type: "CODEX_LOGOUT" });
     await loadConfig();
   }, [loadConfig]);
   const currentModel = availableModels[currentModelIndex] || null;
@@ -834,7 +834,7 @@ function useChat() {
     setStreamingMessageId(null);
     streamingTextRef.current = "";
     setSessionTabGroupId(null);
-    chrome.runtime.sendMessage({ type: "CLEAR_HISTORY" }).catch(() => {
+    chrome.runtime.sendMessage({ type: "CLEAR_CONVERSATION" }).catch(() => {
     });
   }, []);
   const approvePlan = q(() => {
