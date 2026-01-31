@@ -3,11 +3,18 @@
  * Native Messaging Host for LLM in Chrome
  * - Reads Claude CLI credentials from ~/.claude/.credentials.json
  * - Proxies API calls to Anthropic (bypasses CORS)
+ * - Auto-refreshes expired OAuth tokens
  */
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const https = require('https');
+
+// OAuth configuration (same as oauth-manager.js)
+const OAUTH_CONFIG = {
+  tokenUrl: 'https://console.anthropic.com/v1/oauth/token',
+  clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
+};
 
 // Log to file for debugging
 const logFile = path.join(os.tmpdir(), 'llm-chrome-native-host.log');
@@ -46,6 +53,92 @@ function getClaudeCredentials() {
   }
 }
 
+// Save Claude CLI credentials after refresh
+function saveClaudeCredentials(newCreds) {
+  const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
+
+  try {
+    // Read existing file to preserve other data
+    let existingData = {};
+    if (fs.existsSync(credPath)) {
+      const content = fs.readFileSync(credPath, 'utf8');
+      existingData = JSON.parse(content);
+    }
+
+    // Update claudeAiOauth section
+    existingData.claudeAiOauth = {
+      ...existingData.claudeAiOauth,
+      accessToken: newCreds.accessToken,
+      refreshToken: newCreds.refreshToken || existingData.claudeAiOauth?.refreshToken,
+      expiresAt: newCreds.expiresAt,
+    };
+
+    fs.writeFileSync(credPath, JSON.stringify(existingData, null, 2));
+    log('Credentials file updated with new tokens');
+    return true;
+  } catch (e) {
+    log(`Error saving credentials: ${e.message}`);
+    return false;
+  }
+}
+
+// Refresh OAuth token using refresh token
+function refreshClaudeToken(refreshToken) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({
+      grant_type: 'refresh_token',
+      refresh_token: refreshToken,
+      client_id: OAUTH_CONFIG.clientId,
+    });
+
+    log('Attempting to refresh OAuth token...');
+
+    const url = new URL(OAUTH_CONFIG.tokenUrl);
+    const options = {
+      hostname: url.hostname,
+      port: 443,
+      path: url.pathname,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let responseBody = '';
+      res.on('data', chunk => { responseBody += chunk; });
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          try {
+            const data = JSON.parse(responseBody);
+            const expiresAt = Date.now() + (data.expires_in * 1000);
+            log(`Token refreshed successfully, expires at ${new Date(expiresAt).toISOString()}`);
+            resolve({
+              accessToken: data.access_token,
+              refreshToken: data.refresh_token || refreshToken,
+              expiresAt: expiresAt,
+            });
+          } catch (e) {
+            reject(new Error(`Failed to parse refresh response: ${e.message}`));
+          }
+        } else {
+          log(`Token refresh failed: ${res.statusCode} ${responseBody}`);
+          reject(new Error(`Token refresh failed: ${res.statusCode}`));
+        }
+      });
+    });
+
+    req.on('error', (err) => {
+      log(`Token refresh request error: ${err.message}`);
+      reject(err);
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
 // Read Codex CLI credentials
 function getCodexCredentials() {
   const credPath = path.join(os.homedir(), '.codex', 'auth.json');
@@ -69,9 +162,10 @@ function getCodexCredentials() {
 }
 
 // Proxy API call to Claude or Codex (supports streaming)
-async function proxyApiCall(data) {
+// Includes auto-refresh on 401 for Claude OAuth tokens
+async function proxyApiCall(data, isRetry = false) {
   const { url, method, body, headers } = data;
-  log(`Proxying: ${method} ${url}`);
+  log(`Proxying: ${method} ${url}${isRetry ? ' (retry after refresh)' : ''}`);
 
   // Check if streaming requested
   let isStreaming = false;
@@ -85,6 +179,7 @@ async function proxyApiCall(data) {
   const isClaude = urlObj.hostname.includes('anthropic.com');
 
   let requestHeaders = {};
+  let claudeCreds = null;
 
   if (isCodex) {
     // Codex/OpenAI request
@@ -113,15 +208,15 @@ async function proxyApiCall(data) {
     };
   } else if (isClaude) {
     // Claude/Anthropic request
-    const creds = getClaudeCredentials();
-    if (!creds || !creds.accessToken) {
+    claudeCreds = getClaudeCredentials();
+    if (!claudeCreds || !claudeCreds.accessToken) {
       send({ type: 'api_error', error: 'No Claude CLI credentials found. Run: claude login' });
       return;
     }
 
     requestHeaders = {
       'Content-Type': 'application/json',
-      'Authorization': `Bearer ${creds.accessToken}`,
+      'Authorization': `Bearer ${claudeCreds.accessToken}`,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
       'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14',
@@ -153,7 +248,39 @@ async function proxyApiCall(data) {
 
     log(`Request to ${options.hostname}${options.path} (streaming: ${isStreaming}, type: ${isCodex ? 'codex' : 'claude'})`);
 
-    const req = https.request(options, (res) => {
+    const req = https.request(options, async (res) => {
+      // Handle 401 Unauthorized - try to refresh token (Claude only, and only once)
+      if (res.statusCode === 401 && isClaude && !isRetry && claudeCreds?.refreshToken) {
+        log('Got 401, attempting token refresh...');
+
+        // Drain the response body
+        res.on('data', () => {});
+        res.on('end', async () => {
+          try {
+            const newCreds = await refreshClaudeToken(claudeCreds.refreshToken);
+
+            // Save new credentials to file
+            saveClaudeCredentials(newCreds);
+
+            // Notify extension about refreshed tokens
+            send({
+              type: 'tokens_refreshed',
+              credentials: newCreds
+            });
+
+            // Retry the original request with new token
+            await proxyApiCall(data, true);
+          } catch (refreshErr) {
+            log(`Token refresh failed: ${refreshErr.message}`);
+            send({
+              type: 'api_error',
+              error: `OAuth token expired and refresh failed: ${refreshErr.message}. Run: claude login`
+            });
+          }
+        });
+        return;
+      }
+
       if (isStreaming && res.statusCode === 200) {
         // Handle SSE streaming
         let buffer = '';

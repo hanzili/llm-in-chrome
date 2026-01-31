@@ -9,8 +9,8 @@ export function useChat() {
   const [pendingPlan, setPendingPlan] = useState(null);
 
   // Steps tracking for current task
-  const [completedSteps, setCompletedSteps] = useState([]);
   const [pendingStep, setPendingStep] = useState(null);
+  const currentStepsRef = useRef([]);
 
   // Streaming state
   const streamingTextRef = useRef('');
@@ -80,21 +80,24 @@ export function useChat() {
       setMessages(prev => prev.filter(m => m.type !== 'thinking'));
       setPendingStep({ tool: update.tool, input: update.input });
     } else if (update.status === 'executed') {
-      // Add completed step
-      setCompletedSteps(prev => [...prev, {
+      // Add completed step to ref
+      currentStepsRef.current = [...currentStepsRef.current, {
         tool: update.tool,
         input: pendingStep?.input || update.input,
         result: update.result,
-      }]);
+      }];
       setPendingStep(null);
     } else if (update.status === 'message' && update.text) {
-      // Finalize message
+      // Finalize message with its steps
+      const stepsForMessage = [...currentStepsRef.current];
+      currentStepsRef.current = []; // Reset for next turn
       setMessages(prev => {
         const filtered = prev.filter(m => m.type !== 'thinking' && m.type !== 'streaming');
         return [...filtered, {
           id: Date.now(),
           type: 'assistant',
           text: update.text,
+          steps: stepsForMessage, // Attach steps to this message
         }];
       });
       setStreamingMessageId(null);
@@ -146,7 +149,7 @@ export function useChat() {
     // Clear attached images and reset steps
     const imagesToSend = [...attachedImages];
     setAttachedImages([]);
-    setCompletedSteps([]);
+    currentStepsRef.current = [];
     setPendingStep(null);
 
     // Get active tab
@@ -190,7 +193,7 @@ export function useChat() {
 
   const clearChat = useCallback(() => {
     setMessages([]);
-    setCompletedSteps([]);
+    currentStepsRef.current = [];
     setPendingStep(null);
     setStreamingMessageId(null);
     streamingTextRef.current = '';
@@ -225,7 +228,6 @@ export function useChat() {
     messages,
     isRunning,
     attachedImages,
-    completedSteps,
     pendingStep,
     pendingPlan,
 

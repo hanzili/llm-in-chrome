@@ -41,7 +41,6 @@ export function App() {
         ) : (
           <MessageList
             messages={chat.messages}
-            completedSteps={chat.completedSteps}
             pendingStep={chat.pendingStep}
           />
         )}

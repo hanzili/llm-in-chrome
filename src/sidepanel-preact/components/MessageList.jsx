@@ -2,7 +2,7 @@ import { useRef, useEffect } from 'preact/hooks';
 import { Message } from './Message';
 import { StepsSection } from './StepsSection';
 
-export function MessageList({ messages, completedSteps, pendingStep }) {
+export function MessageList({ messages, pendingStep }) {
   const containerRef = useRef(null);
   const isAtBottomRef = useRef(true);
 
@@ -18,47 +18,38 @@ export function MessageList({ messages, completedSteps, pendingStep }) {
     if (isAtBottomRef.current && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [messages, completedSteps]);
+  }, [messages]);
 
-  // Group messages and inject steps section after last user message when there are steps
+  // Render messages with steps attached to each assistant message
   const renderContent = () => {
     const content = [];
-    let stepsInjected = false;
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
-      content.push(<Message key={msg.id} message={msg} />);
 
-      // Inject steps section after user message if we have completed steps and haven't injected yet
-      if (
-        !stepsInjected &&
-        msg.type === 'user' &&
-        completedSteps.length > 0
-      ) {
+      // For assistant messages with steps, show steps before the message text
+      if (msg.type === 'assistant' && msg.steps && msg.steps.length > 0) {
         content.push(
           <StepsSection
             key={`steps-${msg.id}`}
-            steps={completedSteps}
-            pendingStep={pendingStep}
+            steps={msg.steps}
+            pendingStep={null}
           />
         );
-        stepsInjected = true;
       }
+
+      content.push(<Message key={msg.id} message={msg} />);
     }
 
-    // If there's a pending step but no completed steps, show steps section after last user message
-    if (!stepsInjected && pendingStep) {
-      const lastUserIndex = [...messages].reverse().findIndex(m => m.type === 'user');
-      if (lastUserIndex !== -1) {
-        const insertIndex = messages.length - lastUserIndex;
-        content.splice(insertIndex, 0,
-          <StepsSection
-            key="steps-pending"
-            steps={completedSteps}
-            pendingStep={pendingStep}
-          />
-        );
-      }
+    // Show pending step if there is one (for current in-progress task)
+    if (pendingStep) {
+      content.push(
+        <StepsSection
+          key="steps-pending"
+          steps={[]}
+          pendingStep={pendingStep}
+        />
+      );
     }
 
     return content;

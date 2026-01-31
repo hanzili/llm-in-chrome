@@ -143,6 +143,8 @@ export function useConfig() {
     setCurrentModelIndex(index);
     const model = availableModels[index];
     if (model) {
+      // Clear conversation history when switching models to prevent identity confusion
+      await chrome.runtime.sendMessage({ type: 'CLEAR_CHAT' }).catch(() => {});
       await chrome.runtime.sendMessage({
         type: 'SAVE_CONFIG',
         payload: {

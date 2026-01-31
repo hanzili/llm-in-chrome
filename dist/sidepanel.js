@@ -581,6 +581,8 @@ function useConfig() {
     setCurrentModelIndex(index);
     const model = availableModels[index];
     if (model) {
+      await chrome.runtime.sendMessage({ type: "CLEAR_CHAT" }).catch(() => {
+      });
       await chrome.runtime.sendMessage({
         type: "SAVE_CONFIG",
         payload: {
@@ -673,8 +675,8 @@ function useChat() {
   const [attachedImages, setAttachedImages] = d([]);
   const [sessionTabGroupId, setSessionTabGroupId] = d(null);
   const [pendingPlan, setPendingPlan] = d(null);
-  const [completedSteps, setCompletedSteps] = d([]);
   const [pendingStep, setPendingStep] = d(null);
+  const currentStepsRef = A([]);
   const streamingTextRef = A("");
   const [streamingMessageId, setStreamingMessageId] = d(null);
   y(() => {
@@ -734,19 +736,23 @@ function useChat() {
       setMessages((prev) => prev.filter((m2) => m2.type !== "thinking"));
       setPendingStep({ tool: update.tool, input: update.input });
     } else if (update.status === "executed") {
-      setCompletedSteps((prev) => [...prev, {
+      currentStepsRef.current = [...currentStepsRef.current, {
         tool: update.tool,
         input: (pendingStep == null ? void 0 : pendingStep.input) || update.input,
         result: update.result
-      }]);
+      }];
       setPendingStep(null);
     } else if (update.status === "message" && update.text) {
+      const stepsForMessage = [...currentStepsRef.current];
+      currentStepsRef.current = [];
       setMessages((prev) => {
         const filtered = prev.filter((m2) => m2.type !== "thinking" && m2.type !== "streaming");
         return [...filtered, {
           id: Date.now(),
           type: "assistant",
-          text: update.text
+          text: update.text,
+          steps: stepsForMessage
+          // Attach steps to this message
         }];
       });
       setStreamingMessageId(null);
@@ -790,7 +796,7 @@ function useChat() {
     setMessages((prev) => [...prev, userMessage]);
     const imagesToSend = [...attachedImages];
     setAttachedImages([]);
-    setCompletedSteps([]);
+    currentStepsRef.current = [];
     setPendingStep(null);
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab) {
@@ -829,7 +835,7 @@ function useChat() {
   }, []);
   const clearChat = q(() => {
     setMessages([]);
-    setCompletedSteps([]);
+    currentStepsRef.current = [];
     setPendingStep(null);
     setStreamingMessageId(null);
     streamingTextRef.current = "";
@@ -859,7 +865,6 @@ function useChat() {
     messages,
     isRunning,
     attachedImages,
-    completedSteps,
     pendingStep,
     pendingPlan,
     // Actions
@@ -1154,7 +1159,7 @@ function StepItem({ step, status }) {
     /* @__PURE__ */ u$1("div", { class: "step-status", children: status === "completed" ? "✓" : "..." })
   ] });
 }
-function MessageList({ messages, completedSteps, pendingStep }) {
+function MessageList({ messages, pendingStep }) {
   const containerRef = A(null);
   const isAtBottomRef = A(true);
   const handleScroll = () => {
@@ -1166,44 +1171,36 @@ function MessageList({ messages, completedSteps, pendingStep }) {
     if (isAtBottomRef.current && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [messages, completedSteps]);
+  }, [messages]);
   const renderContent = () => {
     const content = [];
-    let stepsInjected = false;
     for (let i2 = 0; i2 < messages.length; i2++) {
       const msg = messages[i2];
-      content.push(/* @__PURE__ */ u$1(Message, { message: msg }, msg.id));
-      if (!stepsInjected && msg.type === "user" && completedSteps.length > 0) {
+      if (msg.type === "assistant" && msg.steps && msg.steps.length > 0) {
         content.push(
           /* @__PURE__ */ u$1(
             StepsSection,
             {
-              steps: completedSteps,
-              pendingStep
+              steps: msg.steps,
+              pendingStep: null
             },
             `steps-${msg.id}`
           )
         );
-        stepsInjected = true;
       }
+      content.push(/* @__PURE__ */ u$1(Message, { message: msg }, msg.id));
     }
-    if (!stepsInjected && pendingStep) {
-      const lastUserIndex = [...messages].reverse().findIndex((m2) => m2.type === "user");
-      if (lastUserIndex !== -1) {
-        const insertIndex = messages.length - lastUserIndex;
-        content.splice(
-          insertIndex,
-          0,
-          /* @__PURE__ */ u$1(
-            StepsSection,
-            {
-              steps: completedSteps,
-              pendingStep
-            },
-            "steps-pending"
-          )
-        );
-      }
+    if (pendingStep) {
+      content.push(
+        /* @__PURE__ */ u$1(
+          StepsSection,
+          {
+            steps: [],
+            pendingStep
+          },
+          "steps-pending"
+        )
+      );
     }
     return content;
   };
@@ -1698,7 +1695,6 @@ function App() {
       MessageList,
       {
         messages: chat.messages,
-        completedSteps: chat.completedSteps,
         pendingStep: chat.pendingStep
       }
     ) }),
