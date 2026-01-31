@@ -174,7 +174,7 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
       method: 'POST',
       headers: headers,
       body: JSON.stringify({
-        model: 'claude-3-5-haiku-20241022',
+        model: config.model,  // Use user's selected model
         max_tokens: maxTokens,
         messages: messages,
       }),

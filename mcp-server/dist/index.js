@@ -25,6 +25,7 @@ import { spawn } from "child_process";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+const pendingScreenshots = new Map();
 const sessions = new Map();
 let sessionCounter = 0;
 // Native host connection
@@ -40,7 +41,19 @@ Returns a session_id for tracking. Use browser_status to monitor progress.
 Examples:
 - "Fill out the contact form on example.com with my info"
 - "Search for 'MCP protocol' on Google and summarize the first 3 results"
-- "Log into my account and download the latest invoice"`,
+- "Log into my account and download the latest invoice"
+
+WHEN TO USE THIS:
+Use this when you need to interact with websites through a real browser - especially for:
+- Sites requiring login/authentication (the user's browser is already logged in)
+- Dynamic web apps that don't have APIs
+- Tasks where no CLI tool or other MCP server can help
+
+TASK GUIDELINES:
+- Break down complex multi-step tasks. Instead of "research my profile AND find jobs AND apply", do each as a separate task.
+- But don't over-specify. If you're unsure whether a detail helps, leave it out and let the agent figure it out.
+- For exploration tasks ("find a good job for me"), give the goal and let the agent cook.
+- For precise tasks ("fill this form with X"), be specific about what you need.`,
         inputSchema: {
             type: "object",
             properties: {
@@ -58,11 +71,14 @@ Examples:
     },
     {
         name: "browser_message",
-        description: `Send a follow-up message to a running browser task. Use this to:
-- Provide additional instructions
-- Answer the agent's questions
-- Correct the agent's approach
-- Continue a task after it's waiting for input`,
+        description: `Send a follow-up message to a browser task. Works on running OR completed sessions.
+
+Use this to:
+- Continue a completed task with additional instructions ("now apply to this job")
+- Provide context the agent needs mid-task
+- Correct the agent if it's going wrong
+
+The agent retains full memory of the session, so you can build on previous work.`,
         inputSchema: {
             type: "object",
             properties: {
@@ -80,9 +96,14 @@ Examples:
     },
     {
         name: "browser_status",
-        description: `Get the status of browser task(s). Returns current state, progress, and any intermediate results.
+        description: `Get the status of browser task(s). Returns current state, what the agent is doing, and step history.
 
-Call without session_id to get status of all active tasks.`,
+Call without session_id to get status of all active tasks.
+
+Use this to monitor progress and decide whether to intervene:
+- Check "steps" to see what the agent has done (detect wrong paths or loops)
+- Check "current_activity" to see what it's doing now
+- If going wrong: use browser_stop then browser_message to redirect`,
         inputSchema: {
             type: "object",
             properties: {
@@ -206,10 +227,17 @@ function handleNativeMessage(message) {
     const { type, sessionId, results, ...data } = message;
     // Handle batch results from polling
     if (type === 'mcp_results' && Array.isArray(results)) {
+        if (results.length > 0) {
+            console.error(`[MCP] Poll received ${results.length} results:`, results.map((r) => r.type));
+        }
         for (const result of results) {
             processResult(result);
         }
         return;
+    }
+    // Log other message types
+    if (type !== 'no_commands' && type !== 'mcp_results') {
+        console.error(`[MCP] Native message: ${type}`, sessionId || '');
     }
     // Handle single result
     if (sessionId && sessions.has(sessionId)) {
@@ -221,11 +249,21 @@ function handleNativeMessage(message) {
  */
 function processResult(result) {
     const { type, sessionId, ...data } = result;
-    if (!sessionId || !sessions.has(sessionId)) {
-        // Screenshot without session
-        if (type === 'screenshot' && data.data) {
-            console.error(`[MCP] Received screenshot (no session)`);
+    console.error(`[MCP] processResult: type=${type}, sessionId=${sessionId}, activeSessions=${Array.from(sessions.keys()).join(',')}`);
+    // Handle screenshots that might be for pending requests (not real sessions)
+    if (type === 'screenshot' && data.data && sessionId) {
+        const pending = pendingScreenshots.get(sessionId);
+        if (pending) {
+            console.error(`[MCP] Screenshot received for pending request: ${sessionId}`);
+            clearTimeout(pending.timeout);
+            pending.resolve(data.data);
+            pendingScreenshots.delete(sessionId);
+            return;
         }
+    }
+    if (!sessionId || !sessions.has(sessionId)) {
+        // Log why we're skipping
+        console.error(`[MCP] Skipping result: sessionId=${sessionId}, exists=${sessions.has(sessionId)}`);
         return;
     }
     const session = sessions.get(sessionId);
@@ -233,22 +271,40 @@ function processResult(result) {
         case 'task_update':
             session.status = 'running';
             session.currentStep = data.step || data.status;
+            if (session.currentStep) {
+                session.stepHistory.push(session.currentStep);
+            }
             break;
         case 'task_waiting':
             session.status = 'waiting';
             session.currentStep = data.message;
+            if (session.currentStep) {
+                session.stepHistory.push(`[WAITING] ${session.currentStep}`);
+            }
             break;
         case 'task_complete':
             session.status = 'complete';
+            session.completedAt = Date.now();
             session.result = data.result;
+            // Extract answer from currentStep (where extension puts the final answer)
+            session.answer = session.currentStep;
+            console.error(`[MCP] Session ${sessionId} marked COMPLETE`);
             break;
         case 'task_error':
             session.status = 'error';
+            session.completedAt = Date.now();
             session.error = data.error;
             break;
         case 'screenshot':
             if (data.data) {
                 session.screenshots.push(data.data);
+                // Check if there's a pending screenshot request for this session
+                const pending = pendingScreenshots.get(sessionId);
+                if (pending) {
+                    clearTimeout(pending.timeout);
+                    pending.resolve(data.data);
+                    pendingScreenshots.delete(sessionId);
+                }
             }
             break;
     }
@@ -269,18 +325,34 @@ async function sendToNative(message) {
 }
 /**
  * Format session for response
+ *
+ * Keep it simple - the client needs:
+ * - Current activity (what's happening now)
+ * - Full step history (to detect wrong paths or loops)
+ * - Answer when complete
  */
 function formatSession(session) {
-    return {
+    const response = {
         session_id: session.id,
         status: session.status,
-        task: session.task,
-        url: session.url,
-        started_at: new Date(session.startedAt).toISOString(),
-        current_step: session.currentStep,
-        ...(session.result && { result: session.result }),
-        ...(session.error && { error: session.error }),
     };
+    // What's happening right now
+    if (session.status === 'running' || session.status === 'waiting') {
+        response.current_activity = session.currentStep;
+    }
+    // Full step history - client needs this to monitor and intervene
+    if (session.stepHistory.length > 0) {
+        response.steps = session.stepHistory;
+    }
+    // Final answer when complete
+    if (session.status === 'complete') {
+        response.answer = session.answer || session.currentStep;
+    }
+    // Error details
+    if (session.status === 'error') {
+        response.error = session.error;
+    }
+    return response;
 }
 // Create MCP server
 const server = new Server({
@@ -316,6 +388,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     task,
                     url,
                     startedAt: Date.now(),
+                    stepHistory: [],
                     screenshots: []
                 };
                 sessions.set(sessionId, session);
@@ -332,8 +405,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                             type: "text",
                             text: JSON.stringify({
                                 session_id: sessionId,
-                                status: "started",
-                                message: `Task started. Use browser_status("${sessionId}") to monitor progress.`
+                                status: "running"
                             }, null, 2)
                         }]
                 };
@@ -390,14 +462,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 // Return all active sessions
                 const activeSessions = Array.from(sessions.values())
                     .filter(s => s.status !== 'complete' && s.status !== 'error' && s.status !== 'stopped')
-                    .map(formatSession);
+                    .map(s => formatSession(s));
                 return {
                     content: [{
                             type: "text",
-                            text: JSON.stringify({
-                                active_sessions: activeSessions.length,
-                                sessions: activeSessions
-                            }, null, 2)
+                            text: JSON.stringify(activeSessions, null, 2)
                         }]
                 };
             }
@@ -428,27 +497,58 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             case "browser_screenshot": {
                 const sessionId = args?.session_id;
+                const requestId = sessionId || `screenshot-${Date.now()}`;
+                // Create a promise that resolves when screenshot arrives
+                const screenshotPromise = new Promise((resolve) => {
+                    const timeout = setTimeout(() => {
+                        pendingScreenshots.delete(requestId);
+                        resolve(null);
+                    }, 5000); // 5 second timeout
+                    pendingScreenshots.set(requestId, { resolve, timeout });
+                });
                 await sendToNative({
                     type: 'mcp_screenshot',
-                    sessionId
+                    sessionId: requestId
                 });
-                // Wait briefly for screenshot
-                await new Promise(r => setTimeout(r, 2000));
+                const screenshotData = await screenshotPromise;
+                if (screenshotData) {
+                    return {
+                        content: [
+                            {
+                                type: "image",
+                                data: screenshotData,
+                                mimeType: "image/png"
+                            },
+                            {
+                                type: "text",
+                                text: "Screenshot of current browser state"
+                            }
+                        ]
+                    };
+                }
+                // Fallback: check session screenshots if we have a session
                 if (sessionId && sessions.has(sessionId)) {
                     const session = sessions.get(sessionId);
                     if (session.screenshots.length > 0) {
                         const latest = session.screenshots[session.screenshots.length - 1];
                         return {
-                            content: [{
+                            content: [
+                                {
                                     type: "image",
                                     data: latest,
                                     mimeType: "image/png"
-                                }]
+                                },
+                                {
+                                    type: "text",
+                                    text: "Screenshot from session cache"
+                                }
+                            ]
                         };
                     }
                 }
                 return {
-                    content: [{ type: "text", text: "Screenshot captured (check browser_status for result)" }]
+                    content: [{ type: "text", text: "Screenshot request timed out. The browser may not be responding." }],
+                    isError: true
                 };
             }
             default:

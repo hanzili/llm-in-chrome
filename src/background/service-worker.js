@@ -20,6 +20,7 @@ import { startOAuthLogin, importCLICredentials, logout, getAuthStatus } from './
 import { importCodexCredentials, logoutCodex, getCodexAuthStatus } from './modules/codex-oauth-manager.js';
 import { hasHandler, executeToolHandler } from './tool-handlers/index.js';
 import { log, clearLog, saveTaskLogs, initLogging } from './managers/logging-manager.js';
+import { startSession, resetTaskUsage, recordApiCall, recordTaskCompletion, getTaskUsage } from './managers/usage-tracker.js';
 import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking } from './managers/debugger-manager.js';
 import { showAgentIndicators, hideAgentIndicators, hideIndicatorsForToolUse, showIndicatorsAfterToolUse } from './managers/indicator-manager.js';
 import { ensureTabGroup, addTabToGroup, validateTabInGroup, isTabManagedByAgent, registerTabCleanupListener, initTabManager } from './managers/tab-manager.js';
@@ -456,6 +457,11 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     try {
       response = await callLLM(messages, onTextChunk, log, currentTabUrl);
 
+      // Track token usage for cost analysis
+      if (response.usage) {
+        recordApiCall(response.usage);
+      }
+
       // Log AI's complete response including reasoning
       const textBlocks = response.content.filter(b => b.type === 'text');
       const toolUseBlocks = response.content.filter(b => b.type === 'tool_use');
@@ -604,6 +610,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
   taskScreenshots = [];
   taskDebugLog = []; // Clear debug log for new task
   resetApiCallCounter(); // Reset API call counter for logging
+  resetTaskUsage(); // Reset token usage for this task
 
   // Create new abort controller for this task
   createAbortController();
@@ -638,19 +645,26 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
       turns: result.steps || 0,
     });
 
-    // Save clean task log
+    // Get task usage before recording completion
+    const taskUsage = getTaskUsage();
+
+    // Save clean task log with usage
     const logData = {
       task,
       status: currentTask.status,
       startTime,
       endTime: currentTask.endTime,
       messages: result.messages || [],
+      usage: taskUsage,
       error: null,
     };
     await saveTaskLogs(logData, taskScreenshots);
 
     // Hide visual indicators
     await hideAgentIndicators(tabId);
+
+    // Record successful task completion for usage stats
+    recordTaskCompletion(true);
 
     chrome.runtime.sendMessage({ type: 'TASK_COMPLETE', result }).catch(() => {});
     return result;
@@ -667,6 +681,9 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
     currentTask.error = error.message;
     currentTask.endTime = new Date().toISOString();
 
+    // Get task usage before recording completion
+    const taskUsage = getTaskUsage();
+
     // Save log with conversation history (not empty)
     const logData = {
       task,
@@ -674,9 +691,13 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
       startTime,
       endTime: currentTask.endTime,
       messages: conversationHistory || [],
+      usage: taskUsage,
       error: isCancelled ? 'Stopped by user' : error.message,
     };
     await saveTaskLogs(logData, taskScreenshots);
+
+    // Record failed task completion for usage stats
+    recordTaskCompletion(false);
 
     chrome.runtime.sendMessage({
       type: isCancelled ? 'TASK_COMPLETE' : 'TASK_ERROR',
@@ -875,8 +896,21 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // MCP BRIDGE INTEGRATION
 // ============================================
 
-// Track active MCP task sessions
-const activeMcpTasks = new Map(); // sessionId -> { tabId, task }
+// Per-session state for MCP tasks
+// Each session has its own chat history, tab, and status
+const mcpSessions = new Map(); // sessionId -> { tabId, task, messages, status, createdAt }
+
+// Session cleanup interval (clean up sessions older than 1 hour)
+const MCP_SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
+setInterval(() => {
+  const now = Date.now();
+  for (const [sessionId, session] of mcpSessions) {
+    if (now - session.createdAt > MCP_SESSION_TTL_MS) {
+      console.log(`[MCP] Cleaning up old session: ${sessionId}`);
+      mcpSessions.delete(sessionId);
+    }
+  }
+}, 5 * 60 * 1000); // Check every 5 minutes
 
 /**
  * Start a task from MCP server
@@ -903,7 +937,14 @@ async function handleMcpStartTask(sessionId, task, url) {
       tabId = activeTab.id;
     }
 
-    activeMcpTasks.set(sessionId, { tabId, task });
+    // Create session with per-session state
+    mcpSessions.set(sessionId, {
+      tabId,
+      task,
+      messages: [],  // Per-session chat history
+      status: 'running',
+      createdAt: Date.now()
+    });
 
     // Start the task (similar to START_TASK handler but with MCP updates)
     await startMcpTaskInternal(sessionId, tabId, task);
@@ -917,6 +958,12 @@ async function handleMcpStartTask(sessionId, task, url) {
  * Internal MCP task execution
  */
 async function startMcpTaskInternal(sessionId, tabId, task) {
+  const session = mcpSessions.get(sessionId);
+  if (!session) {
+    console.error(`[MCP] Session not found: ${sessionId}`);
+    return;
+  }
+
   // Reset state for new task
   agentOpenedTabs.clear();
   agentSessionActive = true;
@@ -925,6 +972,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
   taskScreenshots = [];
   taskDebugLog = [];
   resetApiCallCounter();
+  resetTaskUsage();
 
   createAbortController();
   const startTime = new Date().toISOString();
@@ -932,9 +980,20 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
 
   await showAgentIndicators(tabId);
 
+  await log('MCP', `Starting task: ${sessionId}`, { task, tabId });
+
   try {
+    // Use per-session messages instead of global conversationHistory
     const result = await runAgentLoop(tabId, task, update => {
       currentTask.steps.push(update);
+
+      // Log each update for debugging
+      log('MCP', `Task update: ${update.status}`, {
+        sessionId,
+        step: currentTask.steps.length,
+        tool: update.tool,
+        text: update.text?.substring(0, 100)
+      });
 
       // Send update to MCP server
       if (update.status === 'thinking' || update.status === 'tool_use') {
@@ -945,11 +1004,14 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
 
       // Also send to sidepanel if open
       chrome.runtime.sendMessage({ type: 'TASK_UPDATE', update }).catch(() => {});
-    }, [], false, conversationHistory, null);
+    }, [], false, session.messages, null);
 
+    // Store messages back in session (per-session history)
     if (result.messages) {
-      conversationHistory = result.messages;
+      session.messages = result.messages;
     }
+    session.status = result.success ? 'complete' : 'error';
+    // Don't delete session - keep it for continuation
 
     await detachDebugger();
     agentSessionActive = false;
@@ -958,7 +1020,24 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     currentTask.endTime = new Date().toISOString();
 
     await hideAgentIndicators(tabId);
-    activeMcpTasks.delete(sessionId);
+
+    // Get task usage before recording completion
+    const taskUsage = getTaskUsage();
+
+    // Save MCP task logs (same as regular tasks)
+    const logData = {
+      task: `[MCP:${sessionId}] ${task}`,
+      status: currentTask.status,
+      startTime,
+      endTime: currentTask.endTime,
+      messages: result.messages || [],
+      usage: taskUsage,
+      error: null,
+    };
+    await saveTaskLogs(logData, taskScreenshots);
+
+    // Record task completion for usage stats
+    recordTaskCompletion(result.success);
 
     // Send completion to MCP server
     sendMcpComplete(sessionId, {
@@ -971,9 +1050,35 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     await detachDebugger();
     agentSessionActive = false;
     await hideAgentIndicators(tabId);
-    activeMcpTasks.delete(sessionId);
+
+    // Update session status but don't delete
+    session.status = 'error';
 
     const isCancelled = error.name === 'AbortError' || taskCancelled;
+    const errorMessage = isCancelled ? 'Stopped by user' : error.message;
+
+    if (isCancelled) {
+      session.status = 'stopped';
+    }
+
+    // Get task usage before recording completion
+    const taskUsage = getTaskUsage();
+
+    // Save MCP task error logs
+    const logData = {
+      task: `[MCP:${sessionId}] ${task}`,
+      status: isCancelled ? 'stopped' : 'error',
+      startTime,
+      endTime: new Date().toISOString(),
+      messages: session.messages || [],
+      usage: taskUsage,
+      error: errorMessage,
+    };
+    await saveTaskLogs(logData, taskScreenshots);
+    await log('ERROR', `[MCP] Task failed: ${errorMessage}`, { sessionId, error: error.stack });
+
+    // Record failed task for usage stats
+    recordTaskCompletion(false);
 
     if (isCancelled) {
       sendMcpComplete(sessionId, { success: false, message: 'Task stopped by user' });
@@ -984,24 +1089,35 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
 }
 
 /**
- * Send follow-up message to running MCP task
+ * Send follow-up message to MCP task (works on running, complete, or stopped sessions)
  */
-function handleMcpSendMessage(sessionId, message) {
+async function handleMcpSendMessage(sessionId, message) {
   console.log(`[MCP] Follow-up message for ${sessionId}:`, message);
 
-  if (!activeMcpTasks.has(sessionId)) {
+  const session = mcpSessions.get(sessionId);
+  if (!session) {
     console.warn(`[MCP] Session not found: ${sessionId}`);
+    sendMcpError(sessionId, 'Session not found');
     return;
   }
 
-  // For now, append to conversation history
-  // The agent will see this in the next turn
-  conversationHistory.push({
+  // Append message to per-session history
+  session.messages.push({
     role: 'user',
     content: message
   });
 
-  sendMcpUpdate(sessionId, 'running', 'Message received, continuing...');
+  // If session is complete/stopped/error, re-run the agent with the new message
+  if (session.status !== 'running') {
+    console.log(`[MCP] Re-activating session ${sessionId} (was: ${session.status})`);
+    session.status = 'running';
+
+    // Re-run the agent with the continuation message
+    await startMcpTaskInternal(sessionId, session.tabId, message);
+  } else {
+    // Session is still running - message will be picked up in next turn
+    sendMcpUpdate(sessionId, 'running', 'Message received, continuing...');
+  }
 }
 
 /**
@@ -1010,11 +1126,13 @@ function handleMcpSendMessage(sessionId, message) {
 function handleMcpStopTask(sessionId) {
   console.log(`[MCP] Stopping task: ${sessionId}`);
 
-  if (!activeMcpTasks.has(sessionId)) {
+  const session = mcpSessions.get(sessionId);
+  if (!session) {
     console.warn(`[MCP] Session not found: ${sessionId}`);
     return;
   }
 
+  session.status = 'stopped';
   taskCancelled = true;
   abortRequest();
 
@@ -1033,8 +1151,8 @@ async function handleMcpScreenshot(sessionId) {
   try {
     let tabId;
 
-    if (sessionId && activeMcpTasks.has(sessionId)) {
-      tabId = activeMcpTasks.get(sessionId).tabId;
+    if (sessionId && mcpSessions.has(sessionId)) {
+      tabId = mcpSessions.get(sessionId).tabId;
     } else {
       // Use current active tab
       const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1067,6 +1185,9 @@ initMcpBridge({
 
 // Start polling for MCP commands
 startMcpPolling();
+
+// Start usage tracking session
+startSession();
 
 console.log('[LLM in Chrome] Service worker loaded');
 console.log('[LLM in Chrome] MCP bridge initialized');

@@ -116,7 +116,9 @@ async function handleMcpCommand(command) {
       break;
 
     case 'send_message':
-      if (onSendMessage && mcpSessions.has(command.sessionId)) {
+      // Allow send_message even if session is complete/error (for continuation)
+      // The service worker will validate if the session actually exists
+      if (onSendMessage) {
         onSendMessage(command.sessionId, command.message);
       }
       break;
@@ -154,9 +156,12 @@ export function sendMcpUpdate(sessionId, status, step) {
 
 /**
  * Send task completion to MCP server
+ * Note: Session is NOT deleted - allows continuation via send_message
  */
 export function sendMcpComplete(sessionId, result) {
-  mcpSessions.delete(sessionId);
+  if (mcpSessions.has(sessionId)) {
+    mcpSessions.get(sessionId).status = 'complete';
+  }
 
   sendToNativeHost({
     type: 'mcp_task_complete',
@@ -167,9 +172,12 @@ export function sendMcpComplete(sessionId, result) {
 
 /**
  * Send task error to MCP server
+ * Note: Session is NOT deleted - allows retry via send_message
  */
 export function sendMcpError(sessionId, error) {
-  mcpSessions.delete(sessionId);
+  if (mcpSessions.has(sessionId)) {
+    mcpSessions.get(sessionId).status = 'error';
+  }
 
   sendToNativeHost({
     type: 'mcp_task_error',
