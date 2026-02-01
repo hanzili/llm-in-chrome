@@ -64,10 +64,15 @@ let askBeforeActing = true;
 // Multi-session support
 
 // Track tabs opened BY agent actions (popups, new windows from clicks)
+// For parallel execution, this is per-session in mcpSessions
 const agentOpenedTabs = new Set();
 
-// Track if we're currently in an active agent session
-let agentSessionActive = false;
+// Track active agent sessions (Set of sessionIds for parallel execution)
+// For UI-triggered tasks (non-MCP), we use a special ID: 'ui-task'
+const activeSessions = new Set();
+
+// Legacy compatibility: check if any session is active
+const isAnySessionActive = () => activeSessions.size > 0;
 
 /**
  * ============================================================================
@@ -113,7 +118,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   // DISABLED CODE BELOW (unreachable):
   // If no active session, don't track
   // eslint-disable-next-line no-unreachable, no-undef
-  if (!agentSessionActive) return;
+  if (!isAnySessionActive()) return;
 
   console.log(`[TAB TRACKING] New tab created: ${tab.id}, openerTabId: ${tab.openerTabId}, windowId: ${tab.windowId}`);
 
@@ -131,7 +136,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   // These might be payment popups, OAuth flows, etc.
   try {
     const window = await chrome.windows.get(tab.windowId);
-    if (window.type === 'popup' && agentSessionActive) {
+    if (window.type === 'popup' && isAnySessionActive()) {
       agentOpenedTabs.add(tab.id);
       console.log(`[TAB TRACKING] Tracking popup tab ${tab.id} (popup window during active session)`);
     }
@@ -148,7 +153,7 @@ chrome.windows.onCreated.addListener(async (window) => {
 
   // DISABLED CODE BELOW (unreachable):
   // eslint-disable-next-line no-unreachable
-  if (!agentSessionActive) return;
+  if (!isAnySessionActive()) return;
 
   console.log(`[WINDOW TRACKING] New window created: ${window.id}, type: ${window.type}`);
 
@@ -176,7 +181,7 @@ chrome.tabs.onRemoved.addListener((_tabId) => {
 // Initialize tab manager with shared state
 // NOTE: sessionTabGroupId removed - now passed as parameter from client
 registerTabCleanupListener(agentOpenedTabs);
-initTabManager({ agentOpenedTabs, agentSessionActive, log });
+initTabManager({ agentOpenedTabs, isAnySessionActive, log });
 
 // ============================================
 // DEBUGGER MANAGEMENT
@@ -312,7 +317,7 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null) {
       taskScreenshots,
       agentOpenedTabs,
       sessionTabGroupId,
-      agentSessionActive,
+      isAnySessionActive,
       addTabToGroup,
       ensureContentScripts,
       getConfig,
@@ -541,8 +546,8 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
         toolUseId: toolUse.id,
         success: !isError,
         resultType: isScreenshot ? 'screenshot' : typeof result,
-        // For screenshots, reference the file (use taskScreenshots.length as counter)
-        screenshot: isScreenshot ? `screenshot_${taskScreenshots.length + 1}.png` : null,
+        // For screenshots, reference the file (use session screenshots length as counter)
+        screenshot: isScreenshot ? `screenshot_${(mcpSession?.screenshots || taskScreenshots).length + 1}.png` : null,
         // For text results, include full content
         textResult: typeof result === 'string' ? result : null,
         // For object results (not screenshots), include structure without base64
@@ -564,9 +569,13 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
         const mediaType = result.imageFormat === 'jpeg' ? 'image/jpeg' : 'image/png';
         await log('SCREENSHOT_API', `Sending to API: ${result.base64Image.length} chars, format=${result.imageFormat}`);
 
-        // Save screenshot for logging as separate file
+        // Save screenshot for logging as separate file (use per-session storage for MCP tasks)
         const dataUrl = `data:${mediaType};base64,${result.base64Image}`;
-        taskScreenshots.push(dataUrl);
+        if (mcpSession) {
+          mcpSession.screenshots.push(dataUrl);
+        } else {
+          taskScreenshots.push(dataUrl);
+        }
 
         // Include the actual output message if present (e.g., "Scrolled down by 5 ticks at (x, y)")
         // Fall back to generic screenshot message if no output
@@ -644,7 +653,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
   // Reset state for new task (but preserve conversation history)
   // NOTE: tabGroupId is now passed from client, not stored globally
   agentOpenedTabs.clear();  // Clear tracked tabs from previous session
-  agentSessionActive = true;  // Mark session as active for popup tracking
+  activeSessions.add('ui-task');  // Mark UI session as active for popup tracking
   askBeforeActing = shouldAskBeforeActing;
   taskCancelled = false;
   taskScreenshots = [];
@@ -672,7 +681,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
     }
 
     await detachDebugger();
-    agentSessionActive = false;  // Mark session as inactive
+    activeSessions.delete('ui-task');  // Mark UI session as inactive
     currentTask.status = result.success ? 'completed' : 'failed';
     currentTask.result = result;
     currentTask.endTime = new Date().toISOString();
@@ -710,7 +719,7 @@ async function startTask(tabId, task, shouldAskBeforeActing = true, images = [],
     return result;
   } catch (error) {
     await detachDebugger();
-    agentSessionActive = false;  // Mark session as inactive
+    activeSessions.delete('ui-task');  // Mark UI session as inactive
     // Hide visual indicators
     await hideAgentIndicators(tabId);
 
@@ -977,14 +986,20 @@ async function handleMcpStartTask(sessionId, task, url) {
       tabId = activeTab.id;
     }
 
-    // Create session with per-session state
+    // Create session with per-session state (enables parallel execution)
     mcpSessions.set(sessionId, {
       tabId,
       task,
-      messages: [],  // Per-session chat history
+      messages: [],       // Per-session chat history
       status: 'running',
-      cancelled: false,  // Per-session cancellation flag
-      createdAt: Date.now()
+      cancelled: false,   // Per-session cancellation flag
+      createdAt: Date.now(),
+      // Per-session state for parallel execution:
+      screenshots: [],    // Screenshots collected during this task
+      debugLog: [],       // Debug log for this task
+      steps: [],          // Task steps
+      openedTabs: new Set(), // Tabs opened by this session
+      startTime: new Date().toISOString(),
     });
 
     // Start the task (similar to START_TASK handler but with MCP updates)
@@ -1005,19 +1020,16 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     return;
   }
 
-  // Reset state for new task
-  agentOpenedTabs.clear();
-  agentSessionActive = true;
+  // Mark this session as active (enables parallel execution tracking)
+  activeSessions.add(sessionId);
+
+  // Per-session state is already initialized in handleMcpStartTask
+  // These are only for legacy compatibility with UI code that reads globals
   askBeforeActing = false; // MCP tasks run without asking
-  taskCancelled = false;
-  taskScreenshots = [];
-  taskDebugLog = [];
-  resetApiCallCounter();
-  resetTaskUsage();
 
   createAbortController();
-  const startTime = new Date().toISOString();
-  currentTask = { tabId, task, status: 'running', steps: [], startTime, mcpSessionId: sessionId };
+  // Note: session.startTime is already set in handleMcpStartTask
+  currentTask = { tabId, task, status: 'running', steps: session.steps, startTime: session.startTime, mcpSessionId: sessionId };
 
   await showAgentIndicators(tabId);
 
@@ -1064,7 +1076,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     // Don't delete session - keep it for continuation
 
     await detachDebugger();
-    agentSessionActive = false;
+    activeSessions.delete(sessionId);  // Mark this session as inactive
     currentTask.status = result.success ? 'completed' : 'failed';
     currentTask.result = result;
     currentTask.endTime = new Date().toISOString();
@@ -1074,17 +1086,17 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     // Get task usage before recording completion
     const taskUsage = getTaskUsage();
 
-    // Save MCP task logs (same as regular tasks)
+    // Save MCP task logs (use per-session screenshots)
     const logData = {
       task: `[MCP:${sessionId}] ${task}`,
       status: currentTask.status,
-      startTime,
+      startTime: session.startTime,
       endTime: currentTask.endTime,
       messages: result.messages || [],
       usage: taskUsage,
       error: null,
     };
-    await saveTaskLogs(logData, taskScreenshots);
+    await saveTaskLogs(logData, session.screenshots);
 
     // Record task completion for usage stats
     recordTaskCompletion(result.success);
@@ -1098,13 +1110,13 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
 
   } catch (error) {
     await detachDebugger();
-    agentSessionActive = false;
+    activeSessions.delete(sessionId);  // Mark this session as inactive
     await hideAgentIndicators(tabId);
 
     // Update session status but don't delete
     session.status = 'error';
 
-    const isCancelled = error.name === 'AbortError' || taskCancelled || session.cancelled;
+    const isCancelled = error.name === 'AbortError' || session.cancelled;
     const errorMessage = isCancelled ? 'Stopped by user' : error.message;
 
     if (isCancelled) {
@@ -1114,17 +1126,17 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     // Get task usage before recording completion
     const taskUsage = getTaskUsage();
 
-    // Save MCP task error logs
+    // Save MCP task error logs (use per-session data)
     const logData = {
       task: `[MCP:${sessionId}] ${task}`,
       status: isCancelled ? 'stopped' : 'error',
-      startTime,
+      startTime: session.startTime,
       endTime: new Date().toISOString(),
       messages: session.messages || [],
       usage: taskUsage,
       error: errorMessage,
     };
-    await saveTaskLogs(logData, taskScreenshots);
+    await saveTaskLogs(logData, session.screenshots);
     await log('ERROR', `[MCP] Task failed: ${errorMessage}`, { sessionId, error: error.stack });
 
     // Record failed task for usage stats
@@ -1183,10 +1195,10 @@ function handleMcpStopTask(sessionId, remove = false) {
   }
 
   session.cancelled = true;  // Per-session cancellation
+  activeSessions.delete(sessionId);  // Remove from active sessions
 
-  // Only set global taskCancelled if this is the currently running task
+  // Only abort if this is the currently running task
   if (currentTask?.mcpSessionId === sessionId) {
-    taskCancelled = true;
     abortRequest();
   }
 

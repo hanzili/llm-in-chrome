@@ -9,7 +9,7 @@ import { clearPosition } from '../modules/mouse-movement.js';
  * @typedef {Object} TabsToolDeps
  * @property {number|null} sessionTabGroupId - ID of the current agent session tab group
  * @property {Set<number>} agentOpenedTabs - Set of tab IDs opened by agent actions
- * @property {boolean} agentSessionActive - Whether agent session is currently active
+ * @property {Function} isAnySessionActive - Function that returns true if any session is active
  * @property {Function} addTabToGroup - Add tab to agent session group
  */
 
@@ -31,7 +31,7 @@ function isRestrictedUrl(url) {
  * @returns {Promise<string>} JSON string with available tabs, group ID, and note
  */
 export async function handleTabsContext(toolInput, deps) {
-  const { sessionTabGroupId, agentOpenedTabs, agentSessionActive } = deps;
+  const { sessionTabGroupId, agentOpenedTabs, isAnySessionActive } = deps;
   let tabs = [];
   const existingTabIds = new Set();
 
@@ -66,7 +66,7 @@ export async function handleTabsContext(toolInput, deps) {
 
   // 3. FALLBACK: Scan popup windows AND new normal windows during active session
   // This catches popups/windows that weren't detected by listeners (payment flows, OAuth, etc.)
-  if (agentSessionActive) {
+  if (isAnySessionActive()) {
     try {
       // Get the main window ID (where the original tab group is)
       let mainWindowId = null;

@@ -238,7 +238,7 @@ export interface ToolHandlerDeps {
   taskScreenshots?: Array<string>;
   agentOpenedTabs?: Set<number>;
   sessionTabGroupId?: number | null;
-  agentSessionActive?: boolean;
+  isAnySessionActive?: () => boolean;
   addTabToGroup?: (tabId: number) => Promise<void>;
   ensureContentScripts?: (tabId: number) => Promise<void>;
   getConfig?: () => any;

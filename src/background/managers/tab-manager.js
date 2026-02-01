@@ -10,13 +10,13 @@ import { retryWithBackoff, isTabDraggingError } from '../utils/retry.js';
 // Tab state - shared references from service worker
 let sessionTabGroupId = null;
 let agentOpenedTabs = null;
-let _agentSessionActive = false; // Used by tabs-tool.js via dependency injection
+let _isAnySessionActive = () => false; // Function to check if any session is active (for parallel execution)
 let logFn = null;
 
 /**
  * @typedef {Object} TabManagerDeps
  * @property {Set<number>} agentOpenedTabs - Set of tab IDs opened by agent
- * @property {boolean} agentSessionActive - Whether agent session is active
+ * @property {Function} isAnySessionActive - Function that returns true if any session is active
  * @property {Function} log - Logging function
  */
 
@@ -27,7 +27,7 @@ let logFn = null;
  */
 export function initTabManager(deps) {
   agentOpenedTabs = deps.agentOpenedTabs;
-  _agentSessionActive = deps.agentSessionActive;
+  _isAnySessionActive = deps.isAnySessionActive;
   logFn = deps.log;
 }
 
@@ -40,11 +40,11 @@ export function setSessionGroupId(groupId) {
 }
 
 /**
- * Update session active state
- * @param {boolean} active - Whether session is active
+ * Check if any agent session is currently active
+ * @returns {boolean} True if any session is active
  */
-export function setSessionActive(active) {
-  _agentSessionActive = active;
+export function isSessionActive() {
+  return _isAnySessionActive();
 }
 
 /**
