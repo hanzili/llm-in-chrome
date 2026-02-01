@@ -1080,7 +1080,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     session.status = result.success ? 'complete' : 'error';
     // Don't delete session - keep it for continuation
 
-    await detachDebugger();
+    await detachDebugger(tabId);  // Only detach this tab (parallel execution)
     activeSessions.delete(sessionId);  // Mark this session as inactive
     currentTask.status = result.success ? 'completed' : 'failed';
     currentTask.result = result;
@@ -1114,7 +1114,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     });
 
   } catch (error) {
-    await detachDebugger();
+    await detachDebugger(tabId);  // Only detach this tab (parallel execution)
     activeSessions.delete(sessionId);  // Mark this session as inactive
     await hideAgentIndicators(tabId);
 

@@ -5,11 +5,10 @@
 
 import { LIMITS } from '../modules/constants.js';
 
-// Debugger state
-let debuggerAttached = false;
-let debuggerTabId = null;
+// Debugger state - now tracks multiple tabs for parallel execution
+const attachedTabs = new Set(); // Set of tab IDs with debugger attached
+const networkEnabledTabs = new Set(); // Tabs with network tracking enabled
 let debuggerListenerRegistered = false;
-let networkTrackingEnabled = false;
 
 // Shared state references (will be initialized)
 let consoleMessages = [];
@@ -45,17 +44,16 @@ function registerDebuggerListener() {
 
   // Handle debugger detachment (tab closed, navigated, or user detached)
   chrome.debugger.onDetach.addListener((source, reason) => {
-    if (source.tabId === debuggerTabId) {
+    if (attachedTabs.has(source.tabId)) {
       console.log(`[DEBUGGER] Detached from tab ${source.tabId}: ${reason}`);
-      debuggerAttached = false;
-      debuggerTabId = null;
-      networkTrackingEnabled = false;
+      attachedTabs.delete(source.tabId);
+      networkEnabledTabs.delete(source.tabId);
     }
   });
 
   chrome.debugger.onEvent.addListener((source, method, params) => {
     // Ignore events from tabs we're not attached to
-    if (source.tabId !== debuggerTabId || !debuggerAttached) return;
+    if (!attachedTabs.has(source.tabId)) return;
 
     if (method === 'Runtime.consoleAPICalled') {
       const msg = {
@@ -162,14 +160,13 @@ export async function ensureDebugger(tabId) {
 
   const alreadyAttached = await isDebuggerAttached(tabId);
   if (alreadyAttached) {
-    debuggerAttached = true;
-    debuggerTabId = tabId;
+    attachedTabs.add(tabId);
     try {
       await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
       // Enable Network to capture CAPTCHA responses
-      if (!networkTrackingEnabled) {
+      if (!networkEnabledTabs.has(tabId)) {
         await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
-        networkTrackingEnabled = true;
+        networkEnabledTabs.add(tabId);
       }
     } catch (e) {
       // Tab may have navigated, debugger may need reattachment
@@ -178,48 +175,52 @@ export async function ensureDebugger(tabId) {
   }
 
   try {
-    // Detach from previous tab if attached to a different one
-    if (debuggerTabId && debuggerTabId !== tabId && debuggerAttached) {
-      try {
-        await chrome.debugger.detach({ tabId: debuggerTabId });
-      } catch (e) {
-        // Already detached, that's fine
-      }
-      debuggerAttached = false;
-      debuggerTabId = null;
-    }
-
+    // For parallel execution: attach to this tab WITHOUT detaching from others
+    // Chrome allows multiple debugger attachments to different tabs
     await chrome.debugger.attach({ tabId }, '1.3');
     await chrome.debugger.sendCommand({ tabId }, 'Runtime.enable');
     // Enable Network to capture CAPTCHA responses
     await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
-    networkTrackingEnabled = true;
+    networkEnabledTabs.add(tabId);
 
-    debuggerAttached = true;
-    debuggerTabId = tabId;
-    await logFn('DEBUGGER', 'Attached to tab', { tabId });
+    attachedTabs.add(tabId);
+    await logFn('DEBUGGER', 'Attached to tab', { tabId, totalAttached: attachedTabs.size });
     return true;
   } catch (err) {
-    debuggerAttached = false;
-    debuggerTabId = null;
+    attachedTabs.delete(tabId);
     await logFn('ERROR', `Failed to attach debugger: ${err.message}`);
     return false;
   }
 }
 
 /**
- * Detach debugger from current tab
+ * Detach debugger from a specific tab or all tabs
+ * @param {number} [tabId] - Optional tab ID to detach. If not provided, detaches from all tabs.
  * @returns {Promise<void>}
  */
-export async function detachDebugger() {
-  if (!debuggerAttached) return;
-  try {
-    await chrome.debugger.detach({ tabId: debuggerTabId });
-  } catch (err) {
-    console.warn('[Debugger] Failed to detach debugger:', err);
+export async function detachDebugger(tabId = null) {
+  if (tabId !== null) {
+    // Detach from specific tab
+    if (!attachedTabs.has(tabId)) return;
+    try {
+      await chrome.debugger.detach({ tabId });
+    } catch (err) {
+      console.warn('[Debugger] Failed to detach debugger from tab', tabId, err);
+    }
+    attachedTabs.delete(tabId);
+    networkEnabledTabs.delete(tabId);
+  } else {
+    // Detach from all tabs (legacy behavior for UI tasks)
+    for (const attachedTabId of attachedTabs) {
+      try {
+        await chrome.debugger.detach({ tabId: attachedTabId });
+      } catch (err) {
+        console.warn('[Debugger] Failed to detach debugger from tab', attachedTabId, err);
+      }
+    }
+    attachedTabs.clear();
+    networkEnabledTabs.clear();
   }
-  debuggerAttached = false;
-  debuggerTabId = null;
 }
 
 /**
@@ -238,8 +239,8 @@ export async function sendDebuggerCommand(tabId, method, params = {}) {
 
     // If debugger is not attached, reattach and retry
     if (errMsg.includes('not attached') || errMsg.includes('detached')) {
-      debuggerAttached = false;
-      debuggerTabId = null;
+      attachedTabs.delete(tabId);
+      networkEnabledTabs.delete(tabId);
 
       const attached = await ensureDebugger(tabId);
       if (!attached) {
@@ -255,21 +256,25 @@ export async function sendDebuggerCommand(tabId, method, params = {}) {
 }
 
 /**
- * Get network tracking state
+ * Get network tracking state for a tab
+ * @param {number} [tabId] - Tab ID to check (if not provided, returns true if any tab has tracking)
  * @returns {boolean} True if network tracking is enabled
  */
-export function isNetworkTrackingEnabled() {
-  return networkTrackingEnabled;
+export function isNetworkTrackingEnabled(tabId = null) {
+  if (tabId !== null) {
+    return networkEnabledTabs.has(tabId);
+  }
+  return networkEnabledTabs.size > 0;
 }
 
 /**
- * Enable network tracking
+ * Enable network tracking for a tab
  * @param {number} tabId - Tab ID to enable network tracking for
  * @returns {Promise<void>}
  */
 export async function enableNetworkTracking(tabId) {
-  if (!networkTrackingEnabled) {
+  if (!networkEnabledTabs.has(tabId)) {
     await sendDebuggerCommand(tabId, 'Network.enable', { maxPostDataSize: 65536 });
-    networkTrackingEnabled = true;
+    networkEnabledTabs.add(tabId);
   }
 }
