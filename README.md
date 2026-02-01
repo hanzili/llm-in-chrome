@@ -78,8 +78,8 @@ Use your Claude Pro/Max subscription ($20-200/month) instead of paying per API c
 
 3. **Install Native Host** (required for Chrome extension):
    ```bash
-   cd native-host
-   ./install.sh
+   # One-liner install
+   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
    ```
 
 4. **Connect in Extension:**
@@ -112,8 +112,8 @@ Use your ChatGPT Pro/Plus subscription ($20-200/month) instead of paying per API
 
 3. **Install Native Host** (required for Chrome extension):
    ```bash
-   cd native-host
-   ./install.sh
+   # One-liner install
+   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
    ```
 
 4. **Connect in Extension:**
