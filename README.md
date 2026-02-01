@@ -16,6 +16,7 @@ Shows the agent applying to jobs, unsubscribing from emails in Gmail, and comple
 - **Tab Management**: Create, close, and switch between tabs
 - **Form Handling**: Fill forms and upload files
 - **Console/Network Monitoring**: Track page logs and network requests
+- **Domain Skills**: Built-in best practices for Gmail, Google Docs, GitHub, LinkedIn, and more
 - **Multi-Provider Support**: Works with Anthropic, OpenAI, Google, and OpenRouter
 - **MCP Server**: Integrate with Claude Code for high-level task automation
 
@@ -84,7 +85,7 @@ Use your Claude Pro/Max subscription ($20-200/month) instead of paying per API c
 4. **Connect in Extension:**
    - Open the extension settings
    - Click "Connect" under Claude Code Plan
-   - The extension will read credentials from `~/.claude/credentials.json`
+   - Credentials are auto-detected from macOS Keychain or `~/.claude/credentials.json`
 
 **Models available:** Opus 4.5, Opus 4, Sonnet 4, Haiku 4.5 (labeled as "Claude Code")
 
