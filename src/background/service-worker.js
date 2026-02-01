@@ -1000,10 +1000,15 @@ async function handleMcpStartTask(sessionId, task, url) {
       steps: [],          // Task steps
       openedTabs: new Set(), // Tabs opened by this session
       startTime: new Date().toISOString(),
+      abortController: new AbortController(), // Per-session abort controller
     });
 
-    // Start the task (similar to START_TASK handler but with MCP updates)
-    await startMcpTaskInternal(sessionId, tabId, task);
+    // Start the task WITHOUT awaiting - enables parallel execution
+    // Error handling is done inside startMcpTaskInternal
+    startMcpTaskInternal(sessionId, tabId, task).catch(error => {
+      console.error(`[MCP] Task execution error:`, error);
+      sendMcpError(sessionId, error.message);
+    });
   } catch (error) {
     console.error(`[MCP] Task start error:`, error);
     sendMcpError(sessionId, error.message);
@@ -1024,11 +1029,11 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
   activeSessions.add(sessionId);
 
   // Per-session state is already initialized in handleMcpStartTask
-  // These are only for legacy compatibility with UI code that reads globals
+  // Note: We use session.abortController for per-session cancellation (parallel execution)
   askBeforeActing = false; // MCP tasks run without asking
 
-  createAbortController();
-  // Note: session.startTime is already set in handleMcpStartTask
+  // Note: session.startTime and session.abortController already set in handleMcpStartTask
+  // currentTask is updated for legacy UI compatibility (shows the most recently started task)
   currentTask = { tabId, task, status: 'running', steps: session.steps, startTime: session.startTime, mcpSessionId: sessionId };
 
   await showAgentIndicators(tabId);
@@ -1197,9 +1202,9 @@ function handleMcpStopTask(sessionId, remove = false) {
   session.cancelled = true;  // Per-session cancellation
   activeSessions.delete(sessionId);  // Remove from active sessions
 
-  // Only abort if this is the currently running task
-  if (currentTask?.mcpSessionId === sessionId) {
-    abortRequest();
+  // Abort this session's requests using per-session abort controller
+  if (session.abortController) {
+    session.abortController.abort();
   }
 
   if (pendingPlanResolve) {
