@@ -121,7 +121,8 @@ function getName(element) {
     var node = element.childNodes[j];
     if (node.nodeType === Node.TEXT_NODE) directText += node.textContent;
   }
-  if (directText && directText.trim() && directText.trim().length >= 3) {
+  // Minimum 2 chars filters single-char noise (bullets, icons) while keeping "No", "OK", "Go"
+  if (directText && directText.trim() && directText.trim().length >= 2) {
     var trimmed = directText.trim();
     return trimmed.length > 100 ? trimmed.substring(0, 100) + "..." : trimmed;
   }

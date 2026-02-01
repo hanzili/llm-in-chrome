@@ -96,33 +96,58 @@ The agent retains full memory of the session, so you can build on previous work.
     },
     {
         name: "browser_status",
-        description: `Get the status of browser task(s). Returns current state, what the agent is doing, and step history.
+        description: `Get the status of browser task(s). Returns current state, steps, reasoning, and answer.
 
 Call without session_id to get status of all active tasks.
 
-Use this to monitor progress and decide whether to intervene:
-- Check "steps" to see what the agent has done (detect wrong paths or loops)
-- Check "current_activity" to see what it's doing now
-- If going wrong: use browser_stop then browser_message to redirect`,
+Response includes:
+- steps: Action summary (what the agent did)
+- reasoning: Full agent thinking process
+- current_activity: What's happening now
+- answer: Final result when complete
+
+Options:
+- wait: Block until task completes (with timeout). Great for fire-and-forget tasks.
+- timeout_ms: Max wait time when wait=true (default: 2 min)`,
         inputSchema: {
             type: "object",
             properties: {
                 session_id: {
                     type: "string",
                     description: "Optional session ID. If omitted, returns all active tasks"
+                },
+                wait: {
+                    type: "boolean",
+                    description: "If true, block until task completes or timeout (default: false)"
+                },
+                timeout_ms: {
+                    type: "number",
+                    description: "Max time to wait in ms when wait=true (default: 120000 = 2 min)"
                 }
             }
         }
     },
     {
         name: "browser_stop",
-        description: "Stop a running browser task and get any partial results.",
+        description: `Stop a browser task.
+
+By default, the task is PAUSED - session is preserved and you can resume later with browser_message.
+
+Set remove=true to DELETE the session completely (frees resources, can't resume).
+
+Use cases:
+- Pause (remove=false): Task went off track, want to correct it later
+- Remove (remove=true): Task completed or failed, done with this session`,
         inputSchema: {
             type: "object",
             properties: {
                 session_id: {
                     type: "string",
                     description: "The session ID to stop"
+                },
+                remove: {
+                    type: "boolean",
+                    description: "If true, delete the session completely. If false (default), just pause - can resume with browser_message"
                 }
             },
             required: ["session_id"]
@@ -139,6 +164,14 @@ Use this to monitor progress and decide whether to intervene:
                     description: "Optional session ID. If omitted, captures the active tab"
                 }
             }
+        }
+    },
+    {
+        name: "browser_debug",
+        description: "Debug tool - dumps internal MCP server state including all sessions and their step history.",
+        inputSchema: {
+            type: "object",
+            properties: {}
         }
     }
 ];
@@ -225,12 +258,13 @@ function processNativeMessages() {
  */
 function handleNativeMessage(message) {
     const { type, sessionId, results, ...data } = message;
+    // LOG EVERYTHING for debugging
+    console.error(`[MCP DEBUG] handleNativeMessage called: type=${type}, hasResults=${!!results}, resultsLen=${results?.length || 0}`);
     // Handle batch results from polling
     if (type === 'mcp_results' && Array.isArray(results)) {
-        if (results.length > 0) {
-            console.error(`[MCP] Poll received ${results.length} results:`, results.map((r) => r.type));
-        }
+        console.error(`[MCP DEBUG] Processing ${results.length} results from poll`);
         for (const result of results) {
+            console.error(`[MCP DEBUG] Result: ${JSON.stringify(result).substring(0, 200)}`);
             processResult(result);
         }
         return;
@@ -272,13 +306,23 @@ function processResult(result) {
             session.status = 'running';
             session.currentStep = data.step || data.status;
             if (session.currentStep) {
-                session.stepHistory.push(session.currentStep);
+                // Always add to reasoning history (full trace)
+                session.reasoningHistory.push(session.currentStep);
+                // Only add non-thinking steps to stepHistory (action summary)
+                if (session.currentStep !== 'thinking' && !session.currentStep.startsWith('[thinking]')) {
+                    session.stepHistory.push(session.currentStep);
+                }
+                // Clear pending messages when we see confirmation they were injected
+                if (session.currentStep.startsWith('[User follow-up]:') && session.pendingMessages.length > 0) {
+                    session.pendingMessages.shift(); // Remove the oldest pending message
+                }
             }
             break;
         case 'task_waiting':
             session.status = 'waiting';
             session.currentStep = data.message;
             if (session.currentStep) {
+                session.reasoningHistory.push(`[WAITING] ${session.currentStep}`);
                 session.stepHistory.push(`[WAITING] ${session.currentStep}`);
             }
             break;
@@ -313,15 +357,25 @@ function processResult(result) {
  * Send message to native host
  */
 async function sendToNative(message) {
-    if (!nativeHost?.stdin) {
+    if (!nativeHost?.stdin || !nativeHost.stdin.writable) {
+        console.error(`[MCP] Reconnecting to native host (stdin=${!!nativeHost?.stdin}, writable=${nativeHost?.stdin?.writable})`);
+        nativeHost = null;
         await connectToNativeHost();
     }
     const json = JSON.stringify(message);
     const buffer = Buffer.from(json);
     const len = Buffer.alloc(4);
     len.writeUInt32LE(buffer.length, 0);
-    nativeHost.stdin.write(len);
-    nativeHost.stdin.write(buffer);
+    console.error(`[MCP] Sending: ${message.type} (${json.length} bytes)`);
+    try {
+        nativeHost.stdin.write(len);
+        nativeHost.stdin.write(buffer);
+    }
+    catch (err) {
+        console.error(`[MCP] Write error:`, err);
+        nativeHost = null;
+        throw err;
+    }
 }
 /**
  * Format session for response
@@ -329,6 +383,7 @@ async function sendToNative(message) {
  * Keep it simple - the client needs:
  * - Current activity (what's happening now)
  * - Full step history (to detect wrong paths or loops)
+ * - Full reasoning history (agent's thinking process)
  * - Answer when complete
  */
 function formatSession(session) {
@@ -340,9 +395,17 @@ function formatSession(session) {
     if (session.status === 'running' || session.status === 'waiting') {
         response.current_activity = session.currentStep;
     }
-    // Full step history - client needs this to monitor and intervene
+    // Full step history - action summary (no thinking markers)
     if (session.stepHistory.length > 0) {
         response.steps = session.stepHistory;
+    }
+    // Full reasoning history - includes all thinking and actions
+    if (session.reasoningHistory.length > 0) {
+        response.reasoning = session.reasoningHistory;
+    }
+    // Show pending messages if any
+    if (session.pendingMessages.length > 0) {
+        response.pending_messages = session.pendingMessages.length;
     }
     // Final answer when complete
     if (session.status === 'complete') {
@@ -389,7 +452,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                     url,
                     startedAt: Date.now(),
                     stepHistory: [],
-                    screenshots: []
+                    reasoningHistory: [],
+                    screenshots: [],
+                    pendingMessages: []
                 };
                 sessions.set(sessionId, session);
                 // Send to extension via native host
@@ -425,31 +490,69 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         isError: true
                     };
                 }
+                const session = sessions.get(sessionId);
+                // Track this message as pending (for visibility in status)
+                session.pendingMessages.push(message);
                 await sendToNative({
                     type: 'mcp_send_message',
                     sessionId,
                     message
                 });
-                const session = sessions.get(sessionId);
-                session.status = 'running';
+                // If session was running, it stays running
+                // If session was complete/stopped, it will be re-activated by the extension
+                if (session.status !== 'running') {
+                    session.status = 'running';
+                }
                 return {
                     content: [{
                             type: "text",
                             text: JSON.stringify({
                                 session_id: sessionId,
                                 status: "message_sent",
-                                message: "Follow-up message sent to the agent"
+                                message: "Follow-up message sent to the agent",
+                                pending_messages: session.pendingMessages.length
                             }, null, 2)
                         }]
                 };
             }
             case "browser_status": {
                 const sessionId = args?.session_id;
+                const shouldWait = args?.wait === true;
+                const timeoutMs = args?.timeout_ms || 120000; // 2 min default
                 if (sessionId) {
                     if (!sessions.has(sessionId)) {
                         return {
                             content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
                             isError: true
+                        };
+                    }
+                    // If wait=true, poll until task completes or timeout
+                    if (shouldWait) {
+                        const startTime = Date.now();
+                        while (Date.now() - startTime < timeoutMs) {
+                            const session = sessions.get(sessionId);
+                            if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
+                                return {
+                                    content: [{
+                                            type: "text",
+                                            text: JSON.stringify(formatSession(session), null, 2)
+                                        }]
+                                };
+                            }
+                            // Wait 500ms before checking again
+                            await new Promise(resolve => setTimeout(resolve, 500));
+                        }
+                        // Timeout - return current status
+                        const session = sessions.get(sessionId);
+                        return {
+                            content: [{
+                                    type: "text",
+                                    text: JSON.stringify({
+                                        ...formatSession(session),
+                                        timeout: true,
+                                        message: `Task still running after ${timeoutMs}ms timeout`
+                                    }, null, 2)
+                                }]
                         };
                     }
                     return {
@@ -472,6 +575,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             case "browser_stop": {
                 const sessionId = args?.session_id;
+                const shouldRemove = args?.remove === true;
                 if (!sessionId || !sessions.has(sessionId)) {
                     return {
                         content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
@@ -480,20 +584,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
                 await sendToNative({
                     type: 'mcp_stop_task',
-                    sessionId
+                    sessionId,
+                    remove: shouldRemove // Tell extension whether to delete or just pause
                 });
                 const session = sessions.get(sessionId);
-                session.status = 'stopped';
-                return {
-                    content: [{
-                            type: "text",
-                            text: JSON.stringify({
-                                session_id: sessionId,
-                                status: "stopped",
-                                partial_result: session.result || session.currentStep
-                            }, null, 2)
-                        }]
-                };
+                const partialResult = session.result || session.currentStep;
+                if (shouldRemove) {
+                    // Delete the session completely
+                    sessions.delete(sessionId);
+                    return {
+                        content: [{
+                                type: "text",
+                                text: JSON.stringify({
+                                    session_id: sessionId,
+                                    status: "removed",
+                                    message: "Session deleted. Cannot resume.",
+                                    partial_result: partialResult
+                                }, null, 2)
+                            }]
+                    };
+                }
+                else {
+                    // Just pause - can resume later
+                    session.status = 'stopped';
+                    return {
+                        content: [{
+                                type: "text",
+                                text: JSON.stringify({
+                                    session_id: sessionId,
+                                    status: "paused",
+                                    message: "Session paused. Use browser_message to resume.",
+                                    partial_result: partialResult
+                                }, null, 2)
+                            }]
+                    };
+                }
             }
             case "browser_screenshot": {
                 const sessionId = args?.session_id;
@@ -549,6 +674,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 return {
                     content: [{ type: "text", text: "Screenshot request timed out. The browser may not be responding." }],
                     isError: true
+                };
+            }
+            case "browser_debug": {
+                // Debug tool to dump internal state
+                const allSessions = Array.from(sessions.entries()).map(([id, s]) => ({
+                    id,
+                    status: s.status,
+                    task: s.task?.substring(0, 50),
+                    stepHistoryLength: s.stepHistory.length,
+                    reasoningHistoryLength: s.reasoningHistory?.length || 0,
+                    stepHistory: s.stepHistory.slice(-10), // Last 10 steps
+                    reasoningHistory: s.reasoningHistory?.slice(-10), // Last 10 reasoning entries
+                    pendingMessages: s.pendingMessages?.length || 0,
+                    currentStep: s.currentStep,
+                    answer: s.answer,
+                    error: s.error,
+                    startedAt: s.startedAt,
+                    completedAt: s.completedAt,
+                }));
+                return {
+                    content: [{
+                            type: "text",
+                            text: JSON.stringify({
+                                totalSessions: sessions.size,
+                                nativeHostConnected: !!nativeHost?.stdin,
+                                sessions: allSessions
+                            }, null, 2)
+                        }]
                 };
             }
             default:

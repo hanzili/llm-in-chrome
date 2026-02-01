@@ -401,33 +401,31 @@ export class CodexProvider extends BaseProvider {
             });
           }
         }
-      } else if (msg.role === 'assistant') {
+      } else if (msg.role === 'assistant' && Array.isArray(msg.content)) {
         // Assistant message - could have text and/or tool calls
-        if (Array.isArray(msg.content)) {
-          const textBlocks = msg.content.filter(b => b.type === 'text');
-          const toolUses = msg.content.filter(b => b.type === 'tool_use');
+        const textBlocks = msg.content.filter(b => b.type === 'text');
+        const toolUses = msg.content.filter(b => b.type === 'tool_use');
 
-          // Add text response if present
-          if (textBlocks.length > 0) {
-            const text = textBlocks.map(b => b.text).join('\n');
-            if (text.trim()) {
-              input.push({
-                type: 'message',
-                role: 'assistant',
-                content: [{ type: 'output_text', text }],
-              });
-            }
-          }
-
-          // Add function calls
-          for (const toolUse of toolUses) {
+        // Add text response if present
+        if (textBlocks.length > 0) {
+          const text = textBlocks.map(b => b.text).join('\n');
+          if (text.trim()) {
             input.push({
-              type: 'function_call',
-              call_id: toolUse.id,
-              name: toolUse.name,
-              arguments: JSON.stringify(toolUse.input),
+              type: 'message',
+              role: 'assistant',
+              content: [{ type: 'output_text', text }],
             });
           }
+        }
+
+        // Add function calls
+        for (const toolUse of toolUses) {
+          input.push({
+            type: 'function_call',
+            call_id: toolUse.id,
+            name: toolUse.name,
+            arguments: JSON.stringify(toolUse.input),
+          });
         }
       }
     }

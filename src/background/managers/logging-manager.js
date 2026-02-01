@@ -92,6 +92,105 @@ export async function clearLog() {
 }
 
 /**
+ * Filter debug log entries to keep only essential information
+ * Keeps: API calls, AI_RESPONSE, TOOL, TOOL_RESULT, errors, lifecycle events, memory/compaction info
+ * Removes: MCP updates (redundant with TOOL entries), SCREENSHOT_API
+ * @param {Array<Object>} debugLog - Raw debug log entries
+ * @returns {Array<Object>} Filtered log entries
+ */
+function filterDebugLog(debugLog) {
+  // Only keep essential entry types for clean, readable logs
+  const essentialTypes = [
+    'API',           // API calls with timing and tokens
+    'AI_RESPONSE',   // AI reasoning and tool choices
+    'TOOL',          // Tool execution start
+    'TOOL_RESULT',   // Tool execution result
+    'ERROR',         // Errors
+    'START',         // Task start
+    'SKILLS',        // Domain skills loaded
+    'TASK',          // Task completion
+    'MEMORY',        // Token counts per turn
+    'COMPACT',       // Context compression events
+  ];
+  return debugLog.filter(entry => essentialTypes.includes(entry.type));
+}
+
+/**
+ * Build turns array from debug log entries
+ * This uses AI_RESPONSE and TOOL_RESULT entries which contain complete history
+ * (unlike compressed messages which lose middle turns)
+ * @param {Array<Object>} debugLog - Debug log entries
+ * @returns {Array<Object>} Array of turns with tools and ai_response
+ */
+function buildTurnsFromDebugLog(debugLog) {
+  const turns = [];
+  let currentTurn = null;
+  let pendingToolResults = [];
+
+  for (const entry of debugLog) {
+    if (entry.type === 'AI_RESPONSE') {
+      // Flush any pending tool results to previous turn
+      if (currentTurn && pendingToolResults.length > 0) {
+        for (const result of pendingToolResults) {
+          const tool = currentTurn.tools.find(t => t.name === result.toolName && t.result === null);
+          if (tool) {
+            tool.result = result.result;
+          }
+        }
+        pendingToolResults = [];
+      }
+
+      // Start new turn
+      try {
+        const data = JSON.parse(entry.data);
+        currentTurn = {
+          tools: (data.toolCalls || []).map(tc => ({
+            name: tc.name,
+            input: tc.input,
+            result: null
+          })),
+          ai_response: data.textContent || null
+        };
+        turns.push(currentTurn);
+      } catch (e) {
+        // Skip malformed entries
+      }
+    } else if (entry.type === 'TOOL_RESULT' && currentTurn) {
+      try {
+        const data = JSON.parse(entry.data);
+        const toolName = data.tool;
+        // Try to find matching tool in current turn
+        const tool = currentTurn.tools.find(t => t.name === toolName && t.result === null);
+        if (tool) {
+          // Build result string
+          let result = data.error || data.textResult || '';
+          if (data.objectResult) {
+            result = typeof data.objectResult === 'string'
+              ? data.objectResult
+              : JSON.stringify(data.objectResult);
+          }
+          if (data.screenshot) {
+            result += ' [+screenshot]';
+          }
+          tool.result = result.substring(0, 2000); // Limit result size
+        } else {
+          // Queue for next matching
+          pendingToolResults.push({
+            toolName,
+            result: data.error || data.textResult || JSON.stringify(data.objectResult || {})
+          });
+        }
+      } catch (e) {
+        // Skip malformed entries
+      }
+    }
+  }
+
+  // Clean up empty turns
+  return turns.filter(t => t.ai_response || t.tools.length > 0);
+}
+
+/**
  * Save task logs to a folder with clean format for debugging
  * @param {Object} taskData - Task data object
  * @param {string} taskData.task - Task description
@@ -110,6 +209,9 @@ export async function saveTaskLogs(taskData, screenshots = []) {
     const folder = `browser-agent/${timestamp}`;
 
     // Build clean log format
+    // Build turns from debug log (complete history) instead of compressed messages
+    const turns = buildTurnsFromDebugLog(taskDebugLog);
+
     const cleanLog = {
       task: taskData.task,
       status: taskData.status,
@@ -119,9 +221,9 @@ export async function saveTaskLogs(taskData, screenshots = []) {
         ? `${((new Date(taskData.endTime) - new Date(taskData.startTime)) / 1000).toFixed(1)}s`
         : null,
       usage: taskData.usage || null,
-      turns: buildCleanTurns(taskData.messages || []),
+      turns: turns,
       screenshots: screenshots.map((_, i) => `screenshot_${i + 1}.png`),
-      debug: taskDebugLog, // Include all logs for debugging (removed filter)
+      debug: filterDebugLog(taskDebugLog), // Filter redundant entries for cleaner logs
       error: taskData.error || null,
     };
 

@@ -452,36 +452,28 @@ export const TOOL_DEFINITIONS = [
 
   {
     name: 'file_upload',
-    description: `Upload a file to a file input element on the page. This tool sets files on <input type="file"> elements. You can provide either a ref to the file input element or a CSS selector. Provide either a local file path (filePath) or a URL (fileUrl) which will be downloaded first. Use this for uploading resumes, images, documents, etc. to web forms.`,
+    description: `Upload a file to a file input element on the page. Provide a local file path and either a ref or CSS selector to identify the file input. Works with hidden file inputs and custom upload buttons.`,
     input_schema: {
       type: 'object',
       properties: {
         ref: {
           type: 'string',
-          description: 'Reference ID of the file input element (e.g., "ref_123"). Get this from read_page or find tools.',
+          description: 'Reference ID of the file input element (e.g., "ref_123"). Get this from read_page.',
         },
         selector: {
           type: 'string',
-          description: 'CSS selector for the file input element (e.g., "input[type=file]", "#resume-upload"). Used if ref is not provided.',
+          description: 'CSS selector for the file input (e.g., "input[type=file]", "#resume-upload"). Used if ref not provided.',
         },
         filePath: {
           type: 'string',
-          description: 'Absolute path to a local file (e.g., "/Users/name/Documents/resume.pdf"). Use this when you know the exact file location.',
-        },
-        fileUrl: {
-          type: 'string',
-          description: 'URL of the file to upload. The file will be downloaded first, then uploaded to the input.',
-        },
-        fileName: {
-          type: 'string',
-          description: 'Name for the downloaded file (e.g., "resume.pdf"). Used with fileUrl.',
+          description: 'Absolute path to the file (e.g., "/Users/name/Documents/resume.pdf").',
         },
         tabId: {
           type: 'number',
-          description: 'Tab ID where the file input is located. Use tabs_context first if you don\'t have a valid tab ID.',
+          description: 'Tab ID where the file input is located.',
         },
       },
-      required: ['tabId'],
+      required: ['tabId', 'filePath'],
     },
     cache_control: {
       type: 'ephemeral',

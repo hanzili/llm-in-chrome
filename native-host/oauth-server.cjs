@@ -57,19 +57,43 @@ function send(message) {
   log(`Sent: ${message.type}`);
 }
 
-// Read Claude CLI credentials
+// Read Claude CLI credentials from file or macOS Keychain
 function getClaudeCredentials() {
+  // Try file first (legacy location)
   const credPath = path.join(os.homedir(), '.claude', '.credentials.json');
-  if (!fs.existsSync(credPath)) return null;
-
-  try {
-    const content = fs.readFileSync(credPath, 'utf8');
-    const creds = JSON.parse(content);
-    return creds.claudeAiOauth || null;
-  } catch (e) {
-    log(`Error reading Claude credentials: ${e.message}`);
-    return null;
+  if (fs.existsSync(credPath)) {
+    try {
+      const content = fs.readFileSync(credPath, 'utf8');
+      const creds = JSON.parse(content);
+      if (creds.claudeAiOauth) {
+        log('Loaded credentials from file');
+        return creds.claudeAiOauth;
+      }
+    } catch (e) {
+      log(`Error reading credentials file: ${e.message}`);
+    }
   }
+
+  // Fallback to macOS Keychain (Claude Code v2.1.29+)
+  if (process.platform === 'darwin') {
+    try {
+      const { execSync } = require('child_process');
+      const result = execSync(
+        'security find-generic-password -s "Claude Code-credentials" -w',
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      if (result && result.trim()) {
+        const creds = JSON.parse(result.trim());
+        log('Loaded credentials from macOS Keychain');
+        return creds.claudeAiOauth || null;
+      }
+    } catch (e) {
+      log(`Keychain read failed: ${e.message}`);
+    }
+  }
+
+  log('No Claude credentials found in file or Keychain');
+  return null;
 }
 
 // Save Claude CLI credentials after refresh
@@ -180,6 +204,10 @@ function getCodexCredentials() {
   }
 }
 
+// Timeout constants
+const IDLE_TIMEOUT_MS = 30000;  // 30 seconds without data = stall
+const TOTAL_TIMEOUT_MS = 120000; // 2 minutes max total
+
 // Proxy API call to Claude or Codex (supports streaming)
 // Includes auto-refresh on 401 for Claude OAuth tokens
 async function proxyApiCall(data, isRetry = false) {
@@ -238,17 +266,9 @@ async function proxyApiCall(data, isRetry = false) {
       'Authorization': `Bearer ${claudeCreds.accessToken}`,
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true',
-      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14',
+      'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14',
       'x-app': 'cli',
-      'user-agent': 'claude-cli/1.0.113 (external, sdk-cli)',
-      'x-stainless-lang': 'js',
-      'x-stainless-package-version': '0.60.0',
-      'x-stainless-os': 'Darwin',
-      'x-stainless-arch': 'arm64',
-      'x-stainless-runtime': 'node',
-      'x-stainless-runtime-version': 'v22.7.0',
-      'x-stainless-retry-count': '0',
-      'x-stainless-timeout': '600',
+      'user-agent': 'claude-code/2.1.29 (Darwin; arm64)',
       ...headers
     };
   } else {
@@ -268,9 +288,16 @@ async function proxyApiCall(data, isRetry = false) {
     log(`Request to ${options.hostname}${options.path} (streaming: ${isStreaming}, type: ${isCodex ? 'codex' : 'claude'})`);
 
     const req = https.request(options, async (res) => {
-      // Handle 401 Unauthorized - try to refresh token (Claude only, and only once)
-      if (res.statusCode === 401 && isClaude && !isRetry && claudeCreds?.refreshToken) {
-        log('Got 401, attempting token refresh...');
+      // Set total timeout for the entire response
+      req.setTimeout(TOTAL_TIMEOUT_MS, () => {
+        log(`Request timeout after ${TOTAL_TIMEOUT_MS}ms`);
+        req.destroy();
+        send({ type: 'api_error', error: `Request timed out after ${TOTAL_TIMEOUT_MS/1000} seconds` });
+      });
+      // Handle 401 Unauthorized or 403 Forbidden - try to refresh token (Claude only, and only once)
+      // 401 = token expired, 403 = token possibly revoked (worth trying refresh anyway)
+      if ((res.statusCode === 401 || res.statusCode === 403) && isClaude && !isRetry && claudeCreds?.refreshToken) {
+        log(`Got ${res.statusCode}, attempting token refresh...`);
 
         // Drain the response body
         res.on('data', () => {});
@@ -293,7 +320,7 @@ async function proxyApiCall(data, isRetry = false) {
             log(`Token refresh failed: ${refreshErr.message}`);
             send({
               type: 'api_error',
-              error: `OAuth token expired and refresh failed: ${refreshErr.message}. Run: claude login`
+              error: `OAuth token invalid and refresh failed: ${refreshErr.message}. Run: claude login`
             });
           }
         });
@@ -301,10 +328,29 @@ async function proxyApiCall(data, isRetry = false) {
       }
 
       if (isStreaming && res.statusCode === 200) {
-        // Handle SSE streaming
+        // Handle SSE streaming with idle timeout detection
         let buffer = '';
+        let lastChunkTime = Date.now();
+        let streamEnded = false;
+
+        // Check for idle timeout (no data received for IDLE_TIMEOUT_MS)
+        const idleChecker = setInterval(() => {
+          if (streamEnded) {
+            clearInterval(idleChecker);
+            return;
+          }
+          const idleTime = Date.now() - lastChunkTime;
+          if (idleTime > IDLE_TIMEOUT_MS) {
+            clearInterval(idleChecker);
+            streamEnded = true;
+            log(`Stream stalled - no data for ${idleTime}ms, aborting`);
+            req.destroy();
+            send({ type: 'api_error', error: `Stream stalled - no data received for ${Math.round(idleTime/1000)} seconds. Claude API may be overloaded.` });
+          }
+        }, 5000);
 
         res.on('data', chunk => {
+          lastChunkTime = Date.now(); // Reset idle timer on each chunk
           buffer += chunk.toString();
 
           // Parse SSE events
@@ -315,6 +361,8 @@ async function proxyApiCall(data, isRetry = false) {
             if (line.startsWith('data: ')) {
               const data = line.slice(6);
               if (data === '[DONE]') {
+                streamEnded = true;
+                clearInterval(idleChecker);
                 send({ type: 'stream_end' });
               } else {
                 try {
@@ -329,8 +377,19 @@ async function proxyApiCall(data, isRetry = false) {
         });
 
         res.on('end', () => {
-          log('Stream ended');
-          send({ type: 'stream_end' });
+          if (!streamEnded) {
+            streamEnded = true;
+            clearInterval(idleChecker);
+            log('Stream ended');
+            send({ type: 'stream_end' });
+          }
+        });
+
+        res.on('error', (err) => {
+          streamEnded = true;
+          clearInterval(idleChecker);
+          log(`Stream error: ${err.message}`);
+          send({ type: 'api_error', error: `Stream error: ${err.message}` });
         });
       } else {
         // Non-streaming response
@@ -453,11 +512,22 @@ function readMcpOutbox() {
 
 // Handle incoming messages
 function handleMessage(msg) {
-  log(`Message: ${msg.type}`);
+  log(`Message: ${msg.type} (full: ${JSON.stringify(msg).substring(0, 200)})`);
+  log(`Type check: "${msg.type}" === "mcp_start_task" ? ${msg.type === 'mcp_start_task'}`);
 
   switch (msg.type) {
     case 'ping':
       send({ type: 'pong' });
+      break;
+
+    case 'debug_log':
+      // Write debug entry to a dedicated debug log file
+      try {
+        const debugFile = path.join(MCP_DIR, 'mcp-debug.log');
+        const entry = `[${msg.entry?.time || new Date().toISOString()}] ${msg.entry?.msg}: ${JSON.stringify(msg.entry?.data)}\n`;
+        fs.appendFileSync(debugFile, entry);
+      } catch (e) {}
+      send({ type: 'debug_logged' });
       break;
 
     // ============================================
@@ -466,6 +536,7 @@ function handleMessage(msg) {
     // ============================================
 
     case 'mcp_start_task':
+      log(`ENTERED mcp_start_task CASE`);
       log(`MCP: Queuing task: ${msg.task?.substring(0, 50)}...`);
       writeMcpInbox({
         type: 'start_task',
@@ -613,6 +684,7 @@ function handleMessage(msg) {
       break;
 
     default:
+      log(`DEFAULT CASE HIT - type: "${msg.type}", typeof: ${typeof msg.type}`);
       send({ type: 'error', error: `Unknown message type: ${msg.type}` });
   }
 }

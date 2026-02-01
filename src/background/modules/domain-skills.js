@@ -43,11 +43,17 @@ export const DOMAIN_SKILLS = [
   {
     domain: 'linkedin.com',
     skill: `LinkedIn best practices:
+
+## Easy Apply Forms
+- **Contact Info page is pre-filled from LinkedIn profile.** Email, phone, and name come from the user's LinkedIn account and cannot be changed. Do not try to modify these fields - just click Next to proceed.
+- **Modal forms may need scrolling** to see all content and buttons. If you can't find a button, scroll down inside the modal.
+- **Use screenshots over read_page** for modals - the accessibility tree often misses modal content.
+
+## General Navigation
 - Job search: Use the Jobs tab, filter by location, experience level, date posted
 - To apply: Click 'Easy Apply' button if available, or 'Apply' to go to external site
 - Profile sections are collapsible - click 'Show all' to expand
-- Connection requests and messages are in the 'My Network' and 'Messaging' tabs
-- Use search filters to narrow down people, companies, or jobs`
+- Connection requests and messages are in the 'My Network' and 'Messaging' tabs`
   },
   {
     domain: 'indeed.com',

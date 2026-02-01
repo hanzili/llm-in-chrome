@@ -7,7 +7,7 @@ import { getToolsForUrl } from '../../tools/definitions.js';
 import { buildSystemPrompt } from './system-prompt.js';
 import { DOMAIN_SKILLS } from './domain-skills.js';
 import { createProvider } from './providers/provider-factory.js';
-import { getAccessToken } from './oauth-manager.js';
+import { getAccessToken, refreshAccessToken } from './oauth-manager.js';
 
 // Configuration (loaded from storage)
 let config = {
@@ -170,7 +170,7 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   }
 
   const makeRequest = async (headers) => {
-    const response = await fetch(config.apiBaseUrl, {
+    return fetch(config.apiBaseUrl, {
       method: 'POST',
       headers: headers,
       body: JSON.stringify({
@@ -179,7 +179,6 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
         messages: messages,
       }),
     });
-    return response;
   };
 
   let headers = await getApiHeaders();
@@ -188,8 +187,10 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   // Handle 401 - try refreshing OAuth token and retry once
   if (response.status === 401 && config.authMethod === 'oauth') {
     console.log('[API] callLLMSimple got 401, attempting token refresh...');
+    let refreshFailed = false;
+    let refreshError = null;
+
     try {
-      const { refreshAccessToken } = await import('./oauth-manager.js');
       const tokens = await refreshAccessToken();
       if (tokens) {
         // Save the new tokens
@@ -200,9 +201,20 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
         });
         headers = await getApiHeaders(); // Get fresh headers with new token
         response = await makeRequest(headers);
+        console.log('[API] Token refresh successful, retried request');
+      } else {
+        refreshFailed = true;
+        refreshError = 'Token refresh returned null';
       }
-    } catch (refreshError) {
-      console.error('[API] Token refresh failed:', refreshError);
+    } catch (err) {
+      refreshFailed = true;
+      refreshError = err.message || 'Unknown refresh error';
+      console.error('[API] Token refresh failed:', err);
+    }
+
+    // If refresh failed and response is still 401, throw descriptive error
+    if (refreshFailed && !response.ok) {
+      throw new Error(`Authentication failed: OAuth token expired and refresh failed (${refreshError}). Please re-authenticate.`);
     }
   }
 
@@ -251,9 +263,35 @@ function getNativeHostPort() {
 
 /**
  * Make API call through native messaging proxy (for OAuth)
+ * Includes automatic retry on stream stalls
  * @private
  */
 async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
+  const MAX_RETRIES = 2;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await callLLMThroughProxyOnce(messages, onTextChunk, log, currentUrl);
+    } catch (err) {
+      const isRetryable = err.message.includes('Stream stalled') ||
+                          err.message.includes('timed out') ||
+                          err.message.includes('no data received');
+
+      if (isRetryable && attempt < MAX_RETRIES) {
+        console.log(`[API] Attempt ${attempt} failed: ${err.message}. Retrying...`);
+        await log('RETRY', `API retry ${attempt}/${MAX_RETRIES}`, { error: err.message });
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
+ * Single attempt at making API call through proxy
+ * @private
+ */
+async function callLLMThroughProxyOnce(messages, onTextChunk = null, log = () => {}, currentUrl = null) {
   const provider = createProvider(config.apiBaseUrl || '', config);
   const isClaudeModel = provider.getName() === 'anthropic';
   const systemPrompt = buildSystemPrompt({ isClaudeModel });
@@ -271,8 +309,12 @@ async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {},
   const callNumber = apiCallCounter;
   const startTime = Date.now();
 
-  return new Promise((resolve, reject) => {
+  // Extension-side timeout as safety net (native host has its own timeout too)
+  const PROXY_TIMEOUT_MS = 150000; // 2.5 minutes
+
+  const apiPromise = new Promise((resolve, reject) => {
     const port = getNativeHostPort();
+    let settled = false;
 
     // Accumulate streaming response
     let streamResult = {
@@ -382,6 +424,15 @@ async function callLLMThroughProxy(messages, onTextChunk = null, log = () => {},
       }
     });
   });
+
+  // Wrap with timeout
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Proxy request timed out after ${PROXY_TIMEOUT_MS / 1000} seconds`));
+    }, PROXY_TIMEOUT_MS);
+  });
+
+  return Promise.race([apiPromise, timeoutPromise]);
 }
 
 /**
@@ -426,8 +477,7 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
   // If calling Codex API (ChatGPT backend), use the provider's native messaging call
   // CodexProvider has its own call() method that handles native messaging with OpenAI SSE format
   if (apiUrl.includes('chatgpt.com') && config.authMethod === 'codex_oauth') {
-    const result = await provider.call(messages, systemPrompt, tools, onTextChunk, log);
-    return result;
+    return provider.call(messages, systemPrompt, tools, onTextChunk, log);
   }
 
   // Add timeout to prevent hanging requests (2 minutes for API calls)
@@ -459,8 +509,10 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
     // Handle 401 - try refreshing OAuth token and retry once
     if (response.status === 401 && config.authMethod === 'oauth') {
       console.log('[API] callLLM got 401, attempting token refresh...');
+      let refreshFailed = false;
+      let refreshErrorMsg = null;
+
       try {
-        const { refreshAccessToken } = await import('./oauth-manager.js');
         const tokens = await refreshAccessToken();
         if (tokens) {
           await chrome.storage.local.set({
@@ -470,9 +522,21 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
           });
           headers = await getApiHeaders();
           response = await makeRequest(headers);
+          console.log('[API] Token refresh successful, retried request');
+        } else {
+          refreshFailed = true;
+          refreshErrorMsg = 'Token refresh returned null';
         }
       } catch (refreshError) {
+        refreshFailed = true;
+        refreshErrorMsg = refreshError.message || 'Unknown refresh error';
         console.error('[API] Token refresh failed:', refreshError);
+      }
+
+      // If refresh failed and response is still 401, throw descriptive error
+      if (refreshFailed && !response.ok) {
+        clearTimeout(timeoutId);
+        throw new Error(`Authentication failed: OAuth token expired and refresh failed (${refreshErrorMsg}). Please re-authenticate.`);
       }
     }
 

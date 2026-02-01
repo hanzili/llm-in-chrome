@@ -347,7 +347,7 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null) {
  * @param {number|null} [initialTabGroupId] - Optional initial tab group ID from client
  * @returns {Promise<Object>} Task result with {success: boolean, message: string, error?: string}
  */
-async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBeforeActing = true, existingHistory = [], initialTabGroupId = null) {
+async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBeforeActing = true, existingHistory = [], initialTabGroupId = null, mcpSession = null) {
   await clearLog();
   await log('START', 'Agent loop started', { tabId: initialTabId, task: task.substring(0, 100) });
 
@@ -425,10 +425,31 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   const configMaxSteps = getConfig().maxSteps;
   const maxSteps = configMaxSteps === 0 ? Infinity : (configMaxSteps || 100);
 
+  // Track injected MCP messages (for mid-execution message injection)
+  let mcpMessagesInjected = mcpSession ? mcpSession.messages.length : 0;
+
   while (steps < maxSteps) {
-    // Check if task was cancelled
-    if (taskCancelled) {
+    // Check if task was cancelled (global or per-session)
+    if (taskCancelled || mcpSession?.cancelled) {
       return { success: false, message: 'Task stopped by user', messages, steps };
+    }
+
+    // Check for new MCP messages at start of each turn (handles turns with no tool calls)
+    if (mcpSession && mcpSession.messages.length > mcpMessagesInjected) {
+      const newMessages = mcpSession.messages.slice(mcpMessagesInjected);
+      mcpMessagesInjected = mcpSession.messages.length;
+
+      await log('MCP', `Injecting ${newMessages.length} follow-up message(s) from user (start of turn)`);
+
+      for (const msg of newMessages) {
+        if (msg.role === 'user') {
+          messages.push({
+            role: 'user',
+            content: [{ type: 'text', text: msg.content }]
+          });
+          onUpdate({ step: steps, status: 'message', text: `[User follow-up]: ${msg.content}` });
+        }
+      }
     }
 
     steps++;
@@ -475,8 +496,8 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
         }))
       });
     } catch (error) {
-      // Handle abort gracefully
-      if (error.name === 'AbortError' || taskCancelled) {
+      // Handle abort gracefully (check both global and per-session cancellation)
+      if (error.name === 'AbortError' || taskCancelled || mcpSession?.cancelled) {
         return { success: false, message: 'Task stopped by user', messages, steps };
       }
       throw error; // Re-throw other errors
@@ -582,6 +603,25 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     }
 
     messages.push({ role: 'user', content: toolResults });
+
+    // Check for new MCP messages injected during execution
+    if (mcpSession && mcpSession.messages.length > mcpMessagesInjected) {
+      const newMessages = mcpSession.messages.slice(mcpMessagesInjected);
+      mcpMessagesInjected = mcpSession.messages.length;
+
+      await log('MCP', `Injecting ${newMessages.length} follow-up message(s) from user`);
+
+      // Inject each new message as a user message
+      for (const msg of newMessages) {
+        if (msg.role === 'user') {
+          messages.push({
+            role: 'user',
+            content: [{ type: 'text', text: msg.content }]
+          });
+          onUpdate({ step: steps, status: 'message', text: `[User follow-up]: ${msg.content}` });
+        }
+      }
+    }
   }
 
   return { success: false, message: `Reached max steps (${maxSteps})`, messages, steps };
@@ -943,6 +983,7 @@ async function handleMcpStartTask(sessionId, task, url) {
       task,
       messages: [],  // Per-session chat history
       status: 'running',
+      cancelled: false,  // Per-session cancellation flag
       createdAt: Date.now()
     });
 
@@ -987,24 +1028,33 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     const result = await runAgentLoop(tabId, task, update => {
       currentTask.steps.push(update);
 
-      // Log each update for debugging
-      log('MCP', `Task update: ${update.status}`, {
-        sessionId,
-        step: currentTask.steps.length,
-        tool: update.tool,
-        text: update.text?.substring(0, 100)
-      });
+      // Log meaningful updates only (skip streaming chunks - they're redundant with AI_RESPONSE)
+      if (update.status !== 'streaming' && update.status !== 'message') {
+        log('MCP', `Task update: ${update.status}`, {
+          sessionId,
+          step: currentTask.steps.length,
+          tool: update.tool,
+          text: update.text?.substring(0, 100)
+        });
+      }
 
-      // Send update to MCP server
-      if (update.status === 'thinking' || update.status === 'tool_use') {
-        sendMcpUpdate(sessionId, 'running', update.text || update.status);
+      // Send update to MCP server with informative step descriptions
+      // Debug: log to verify sessionId
+      console.log('[SW Debug] Sending MCP update:', { sessionId, status: update.status, tool: update.tool });
+
+      if (update.status === 'tool_use' && update.tool) {
+        // Format: "Using read_page" or "Using computer: left_click"
+        const toolDesc = update.text ? `${update.tool}: ${update.text.substring(0, 50)}` : update.tool;
+        sendMcpUpdate(sessionId, 'running', `Using ${toolDesc}`);
+      } else if (update.status === 'thinking') {
+        sendMcpUpdate(sessionId, 'running', 'thinking');
       } else if (update.status === 'message') {
         sendMcpUpdate(sessionId, 'running', update.text);
       }
 
       // Also send to sidepanel if open
       chrome.runtime.sendMessage({ type: 'TASK_UPDATE', update }).catch(() => {});
-    }, [], false, session.messages, null);
+    }, [], false, session.messages, null, session);
 
     // Store messages back in session (per-session history)
     if (result.messages) {
@@ -1054,7 +1104,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     // Update session status but don't delete
     session.status = 'error';
 
-    const isCancelled = error.name === 'AbortError' || taskCancelled;
+    const isCancelled = error.name === 'AbortError' || taskCancelled || session.cancelled;
     const errorMessage = isCancelled ? 'Stopped by user' : error.message;
 
     if (isCancelled) {
@@ -1123,8 +1173,8 @@ async function handleMcpSendMessage(sessionId, message) {
 /**
  * Stop an MCP task
  */
-function handleMcpStopTask(sessionId) {
-  console.log(`[MCP] Stopping task: ${sessionId}`);
+function handleMcpStopTask(sessionId, remove = false) {
+  console.log(`[MCP] Stopping task: ${sessionId}, remove: ${remove}`);
 
   const session = mcpSessions.get(sessionId);
   if (!session) {
@@ -1132,13 +1182,26 @@ function handleMcpStopTask(sessionId) {
     return;
   }
 
-  session.status = 'stopped';
-  taskCancelled = true;
-  abortRequest();
+  session.cancelled = true;  // Per-session cancellation
+
+  // Only set global taskCancelled if this is the currently running task
+  if (currentTask?.mcpSessionId === sessionId) {
+    taskCancelled = true;
+    abortRequest();
+  }
 
   if (pendingPlanResolve) {
     pendingPlanResolve({ approved: false });
     pendingPlanResolve = null;
+  }
+
+  if (remove) {
+    // Delete session completely - chat history gone
+    console.log(`[MCP] Removing session: ${sessionId}`);
+    mcpSessions.delete(sessionId);
+  } else {
+    // Just pause - preserve chat history for resume
+    session.status = 'stopped';
   }
 }
 

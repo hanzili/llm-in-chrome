@@ -110,7 +110,9 @@ async function handleMcpCommand(command) {
   switch (command.type) {
     case 'start_task':
       if (onStartTask) {
+        debugLog('Adding session to mcpSessions', command.sessionId);
         mcpSessions.set(command.sessionId, { status: 'starting' });
+        debugLog('mcpSessions now has', Array.from(mcpSessions.keys()));
         onStartTask(command.sessionId, command.task, command.url);
       }
       break;
@@ -125,8 +127,12 @@ async function handleMcpCommand(command) {
 
     case 'stop_task':
       if (onStopTask && mcpSessions.has(command.sessionId)) {
-        onStopTask(command.sessionId);
-        mcpSessions.delete(command.sessionId);
+        const shouldRemove = command.remove === true;
+        onStopTask(command.sessionId, shouldRemove);
+        // Only delete from bridge if removing completely
+        if (shouldRemove) {
+          mcpSessions.delete(command.sessionId);
+        }
       }
       break;
 
@@ -138,11 +144,28 @@ async function handleMcpCommand(command) {
   }
 }
 
+// Debug logging - writes to native host which saves to file
+function debugLog(msg, data = null) {
+  const entry = { time: new Date().toISOString(), msg, data };
+  console.log('[MCP Debug]', msg, data || '');
+  // Send to native host to write to debug log file
+  try {
+    const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    port.postMessage({ type: 'debug_log', entry });
+    setTimeout(() => port.disconnect(), 50);
+  } catch (_e) { /* Silent fail - native host may not be available */ }
+}
+
 /**
  * Send task update to MCP server
  */
 export function sendMcpUpdate(sessionId, status, step) {
-  if (!mcpSessions.has(sessionId)) return;
+  debugLog('sendMcpUpdate called', { sessionId, status, step: step?.substring?.(0, 50), hasSes: mcpSessions.has(sessionId), sessions: Array.from(mcpSessions.keys()) });
+
+  if (!mcpSessions.has(sessionId)) {
+    debugLog('Session not found, skipping update');
+    return;
+  }
 
   mcpSessions.get(sessionId).status = status;
 
@@ -152,6 +175,7 @@ export function sendMcpUpdate(sessionId, status, step) {
     status,
     step,
   });
+  debugLog('Update sent to native host');
 }
 
 /**
