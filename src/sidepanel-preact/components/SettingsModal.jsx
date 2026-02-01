@@ -173,6 +173,18 @@ function ProvidersTab({ localKeys, setLocalKeys, selectedProvider, setSelectedPr
           />
         </div>
       )}
+
+      <hr />
+
+      {/* MCP Server Integration */}
+      <div class="provider-section">
+        <h4>MCP Server</h4>
+        <p class="provider-desc">
+          Control this browser from Claude Code or any MCP client.{' '}
+          <a href="https://github.com/hanzili/llm-in-chrome#mcp-server-integration" target="_blank">Setup guide</a>
+        </p>
+        <code class="install-cmd">npm install -g llm-in-chrome-mcp</code>
+      </div>
     </div>
   );
 }
