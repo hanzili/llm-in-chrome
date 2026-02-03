@@ -55,48 +55,35 @@ echo -e "${GREEN}✓${NC} Manifest directory: $MANIFEST_DIR"
 # Create manifest directory if it doesn't exist
 mkdir -p "$MANIFEST_DIR"
 
-# Get extension ID
+# Extension ID - Chrome Web Store published ID
+CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"
+
 echo ""
 echo "╔════════════════════════════════════════════════════════╗"
-echo "║  Find Your Extension ID:                               ║"
-echo "║  1. Open: chrome://extensions                          ║"
-echo "║  2. Enable 'Developer mode' (top right toggle)         ║"
-echo "║  3. Find 'LLM in Chrome'                               ║"
-echo "║  4. Copy the ID (looks like: abcdefgh...)              ║"
+echo "║  Extension ID Configuration                            ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
+echo "Default (Chrome Web Store): $CHROME_STORE_ID"
+echo ""
+read -p "Press Enter to use default, or paste a custom ID: " CUSTOM_ID
 
-# Try to detect extension ID automatically
-DETECTED_ID=""
-if [ -d "$SCRIPT_DIR/../" ]; then
-    # Look for manifest.json to verify this is an extension
-    if [ -f "$SCRIPT_DIR/../manifest.json" ]; then
-        echo -e "${YELLOW}ℹ${NC}  Extension detected in parent directory"
+if [ -z "$CUSTOM_ID" ]; then
+    EXTENSION_ID="$CHROME_STORE_ID"
+    echo -e "${GREEN}✓${NC} Using Chrome Web Store ID"
+else
+    EXTENSION_ID=$(echo "$CUSTOM_ID" | xargs)
+    # Validate extension ID format (32 lowercase letters)
+    if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
+        echo -e "${YELLOW}⚠  Warning: Extension ID should be 32 lowercase letters${NC}"
+        echo "  Your input: $EXTENSION_ID"
+        read -p "Continue anyway? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
     fi
+    echo -e "${GREEN}✓${NC} Using custom ID: $EXTENSION_ID"
 fi
-
-read -p "Enter your extension ID: " EXTENSION_ID
-
-# Trim whitespace
-EXTENSION_ID=$(echo "$EXTENSION_ID" | xargs)
-
-if [ -z "$EXTENSION_ID" ]; then
-    echo -e "${RED}✗ Extension ID cannot be empty${NC}"
-    exit 1
-fi
-
-# Validate extension ID format (32 lowercase letters)
-if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
-    echo -e "${YELLOW}⚠  Warning: Extension ID should be 32 lowercase letters${NC}"
-    echo "  Your input: $EXTENSION_ID"
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-fi
-
-echo -e "${GREEN}✓${NC} Extension ID: $EXTENSION_ID"
 
 # Create manifest with correct path and extension ID
 MANIFEST_FILE="$MANIFEST_DIR/com.llm_in_chrome.oauth_host.json"

@@ -50,29 +50,31 @@ curl -fsSL "$REPO_URL/native-host/oauth-server.cjs" -o "$INSTALL_DIR/oauth-serve
 chmod +x "$INSTALL_DIR/oauth-server.cjs"
 echo -e "${GREEN}✓${NC} Downloaded oauth-server.cjs"
 
-# Get extension ID
+# Extension ID - Chrome Web Store published ID
+CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"
+
 echo ""
 echo "╔════════════════════════════════════════════════════════╗"
-echo "║  Find Your Extension ID:                               ║"
-echo "║  1. Open: chrome://extensions                          ║"
-echo "║  2. Enable 'Developer mode' (top right)                ║"
-echo "║  3. Find 'LLM in Chrome' and copy the ID               ║"
+echo "║  Extension ID Configuration                            ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
-read -p "Enter your extension ID: " EXTENSION_ID
+echo "Default (Chrome Web Store): $CHROME_STORE_ID"
+echo ""
+read -p "Press Enter to use default, or paste a custom ID: " CUSTOM_ID
 
-EXTENSION_ID=$(echo "$EXTENSION_ID" | xargs)
-if [ -z "$EXTENSION_ID" ]; then
-    echo -e "${RED}✗ Extension ID cannot be empty${NC}"
-    exit 1
-fi
-
-# Validate format
-if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
-    echo -e "${YELLOW}⚠  Warning: ID should be 32 lowercase letters${NC}"
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+if [ -z "$CUSTOM_ID" ]; then
+    EXTENSION_ID="$CHROME_STORE_ID"
+    echo -e "${GREEN}✓${NC} Using Chrome Web Store ID"
+else
+    EXTENSION_ID=$(echo "$CUSTOM_ID" | xargs)
+    # Validate format
+    if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
+        echo -e "${YELLOW}⚠  Warning: ID should be 32 lowercase letters${NC}"
+        read -p "Continue anyway? (y/n) " -n 1 -r
+        echo
+        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
+    fi
+    echo -e "${GREEN}✓${NC} Using custom ID: $EXTENSION_ID"
 fi
 
 # Create manifest directory

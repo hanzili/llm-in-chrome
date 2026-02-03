@@ -2,6 +2,10 @@
 
 An autonomous browser agent that lets any LLM control your browser. Multi-provider support (Claude, GPT, Gemini, Mistral, Qwen) with full browser automation capabilities.
 
+[![Chrome Web Store](https://img.shields.io/chrome-web-store/v/iklpkemlmbhemkiojndpbhoakgikpmcd)](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)
+
+**[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
+
 ## Demo
 
 [![demo video](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
@@ -22,12 +26,16 @@ Shows the agent applying to jobs, unsubscribing from emails in Gmail, and comple
 
 ## Installation
 
-### Prerequisites
+### Option 1: Chrome Web Store (Recommended)
 
-- Google Chrome (version 120+)
-- Node.js 18+ (for development)
+1. **[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
 
-### Load the Extension
+2. Install the native host (required for subscription plans):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
+   ```
+
+### Option 2: Load Unpacked (Development)
 
 1. Clone this repository:
    ```bash
@@ -42,6 +50,11 @@ Shows the agent applying to jobs, unsubscribing from emails in Gmail, and comple
 4. Click "Load unpacked" and select the extension directory
 
 5. The extension icon should appear in your toolbar
+
+### Prerequisites
+
+- Google Chrome (version 120+)
+- Node.js 18+ (for native host)
 
 ### Configuration
 
