@@ -167,7 +167,43 @@ function refreshClaudeToken(refreshToken) {
           }
         } else {
           log(`Token refresh failed: ${res.statusCode} ${responseBody}`);
-          reject(new Error(`Token refresh failed: ${res.statusCode}`));
+
+          // Parse OAuth error response for better error messages
+          let errorMessage = `Token refresh failed (${res.statusCode})`;
+          try {
+            const errorData = JSON.parse(responseBody);
+            const oauthError = errorData.error || errorData.error_code;
+            const errorDesc = errorData.error_description || errorData.message;
+
+            // Provide actionable guidance based on OAuth error type
+            switch (oauthError) {
+              case 'invalid_grant':
+                errorMessage = 'Refresh token expired or revoked. Your Claude CLI session has ended.';
+                break;
+              case 'invalid_client':
+                errorMessage = 'OAuth client configuration error. Please reinstall LLM in Chrome.';
+                break;
+              case 'unauthorized_client':
+                errorMessage = 'Client not authorized for this operation. Try: claude logout && claude login';
+                break;
+              case 'server_error':
+                errorMessage = 'Anthropic API temporarily unavailable. Please try again in a few minutes.';
+                break;
+              default:
+                errorMessage = errorDesc || `OAuth error: ${oauthError || res.statusCode}`;
+            }
+          } catch (e) {
+            // Response wasn't JSON, use status code based message
+            if (res.statusCode === 400) {
+              errorMessage = 'Refresh token invalid. Your Claude CLI session has ended.';
+            } else if (res.statusCode === 401) {
+              errorMessage = 'Authentication failed. Please re-authenticate.';
+            } else if (res.statusCode >= 500) {
+              errorMessage = 'Anthropic API error. Please try again later.';
+            }
+          }
+
+          reject(new Error(errorMessage));
         }
       });
     });
@@ -320,7 +356,10 @@ async function proxyApiCall(data, isRetry = false) {
             log(`Token refresh failed: ${refreshErr.message}`);
             send({
               type: 'api_error',
-              error: `OAuth token invalid and refresh failed: ${refreshErr.message}. Run: claude login`
+              error: refreshErr.message,
+              errorType: 'oauth_refresh_failed',
+              action: 'Run: claude login',
+              hint: 'Your Claude CLI session has expired. Re-authenticate to continue.'
             });
           }
         });
