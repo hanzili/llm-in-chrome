@@ -28,6 +28,20 @@ import * as fs from "fs";
 const pendingScreenshots = new Map();
 const sessions = new Map();
 let sessionCounter = 0;
+// Concurrency limit - too many parallel agents overloads Chrome
+const MAX_CONCURRENT_SESSIONS = parseInt(process.env.LLM_IN_CHROME_MAX_SESSIONS || '5', 10);
+/**
+ * Count currently active sessions (running or starting)
+ */
+function getActiveSessionCount() {
+    let count = 0;
+    for (const session of sessions.values()) {
+        if (session.status === 'running' || session.status === 'starting') {
+            count++;
+        }
+    }
+    return count;
+}
 // Native host connection
 let nativeHost = null;
 let messageBuffer = Buffer.alloc(0);
@@ -53,7 +67,9 @@ TASK GUIDELINES:
 - Break down complex multi-step tasks. Instead of "research my profile AND find jobs AND apply", do each as a separate task.
 - But don't over-specify. If you're unsure whether a detail helps, leave it out and let the agent figure it out.
 - For exploration tasks ("find a good job for me"), give the goal and let the agent cook.
-- For precise tasks ("fill this form with X"), be specific about what you need.`,
+- For precise tasks ("fill this form with X"), be specific about what you need.
+
+CONCURRENCY LIMIT: Max 5 parallel browser agents (configurable via LLM_IN_CHROME_MAX_SESSIONS env var). Too many agents overloads Chrome.`,
         inputSchema: {
             type: "object",
             properties: {
@@ -106,23 +122,13 @@ Response includes:
 - current_activity: What's happening now
 - answer: Final result when complete
 
-Options:
-- wait: Block until task completes (with timeout). Great for fire-and-forget tasks.
-- timeout_ms: Max wait time when wait=true (default: 2 min)`,
+IMPORTANT: Poll this frequently (every few seconds) to monitor agent progress in real-time. This allows you to intervene with browser_message if the agent goes off track.`,
         inputSchema: {
             type: "object",
             properties: {
                 session_id: {
                     type: "string",
                     description: "Optional session ID. If omitted, returns all active tasks"
-                },
-                wait: {
-                    type: "boolean",
-                    description: "If true, block until task completes or timeout (default: false)"
-                },
-                timeout_ms: {
-                    type: "number",
-                    description: "Max time to wait in ms when wait=true (default: 120000 = 2 min)"
                 }
             }
         }
@@ -266,6 +272,29 @@ function handleNativeMessage(message) {
         for (const result of results) {
             console.error(`[MCP DEBUG] Result: ${JSON.stringify(result).substring(0, 200)}`);
             processResult(result);
+        }
+        return;
+    }
+    // Handle OAuth/API errors that affect all sessions
+    if (type === 'api_error') {
+        const errorType = data.errorType || 'unknown';
+        const hint = data.hint || '';
+        const action = data.action || '';
+        console.error(`[MCP] API Error: ${data.error}`);
+        if (hint)
+            console.error(`[MCP] Hint: ${hint}`);
+        if (action)
+            console.error(`[MCP] Action: ${action}`);
+        // If OAuth failed, mark all running sessions as errored
+        if (errorType === 'oauth_refresh_failed') {
+            for (const [id, session] of sessions.entries()) {
+                if (session.status === 'running' || session.status === 'starting') {
+                    session.status = 'error';
+                    session.error = `Authentication expired: ${data.error}. ${action}`;
+                    session.completedAt = Date.now();
+                    console.error(`[MCP] Session ${id} marked as error due to OAuth failure`);
+                }
+            }
         }
         return;
     }
@@ -444,6 +473,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                         isError: true
                     };
                 }
+                // Check concurrency limit
+                const activeCount = getActiveSessionCount();
+                if (activeCount >= MAX_CONCURRENT_SESSIONS) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: JSON.stringify({
+                                    error: "max_concurrent_sessions",
+                                    message: `Too many parallel browser agents (${activeCount}/${MAX_CONCURRENT_SESSIONS}). Wait for some to complete or stop them first.`,
+                                    active_sessions: activeCount,
+                                    max_sessions: MAX_CONCURRENT_SESSIONS,
+                                    hint: "Use browser_status to check running tasks, browser_stop to stop some, then retry."
+                                }, null, 2)
+                            }],
+                        isError: true
+                    };
+                }
                 const sessionId = generateSessionId();
                 const session = {
                     id: sessionId,
@@ -517,42 +563,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             case "browser_status": {
                 const sessionId = args?.session_id;
-                const shouldWait = args?.wait === true;
-                const timeoutMs = args?.timeout_ms || 120000; // 2 min default
                 if (sessionId) {
                     if (!sessions.has(sessionId)) {
                         return {
                             content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
                             isError: true
-                        };
-                    }
-                    // If wait=true, poll until task completes or timeout
-                    if (shouldWait) {
-                        const startTime = Date.now();
-                        while (Date.now() - startTime < timeoutMs) {
-                            const session = sessions.get(sessionId);
-                            if (session.status === 'complete' || session.status === 'error' || session.status === 'stopped') {
-                                return {
-                                    content: [{
-                                            type: "text",
-                                            text: JSON.stringify(formatSession(session), null, 2)
-                                        }]
-                                };
-                            }
-                            // Wait 500ms before checking again
-                            await new Promise(resolve => setTimeout(resolve, 500));
-                        }
-                        // Timeout - return current status
-                        const session = sessions.get(sessionId);
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: JSON.stringify({
-                                        ...formatSession(session),
-                                        timeout: true,
-                                        message: `Task still running after ${timeoutMs}ms timeout`
-                                    }, null, 2)
-                                }]
                         };
                     }
                     return {
