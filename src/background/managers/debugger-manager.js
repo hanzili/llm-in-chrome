@@ -8,13 +8,21 @@ import { LIMITS } from '../modules/constants.js';
 // Debugger state - now tracks multiple tabs for parallel execution
 const attachedTabs = new Set(); // Set of tab IDs with debugger attached
 const networkEnabledTabs = new Set(); // Tabs with network tracking enabled
+const targetDiscoveryEnabled = new Set(); // Tabs with target discovery enabled
 let debuggerListenerRegistered = false;
+
+// Popup tracking: maps popup tabId -> opener tabId
+const popupOpeners = new Map();
 
 // Shared state references (will be initialized)
 let consoleMessages = [];
 let networkRequests = [];
 let capturedCaptchaData = null;
 let logFn = null;
+
+// Callbacks for popup events (set by service worker)
+let onPopupOpened = null;  // (popupTabId, openerTabId) => void
+let onPopupClosed = null;  // (popupTabId, openerTabId) => void
 
 /**
  * @typedef {Object} DebuggerDeps
@@ -33,6 +41,17 @@ export function initDebugger(deps) {
   networkRequests = deps.networkRequests;
   capturedCaptchaData = deps.capturedCaptchaData;
   logFn = deps.log;
+}
+
+/**
+ * Set callbacks for popup events
+ * @param {Object} callbacks - Popup event callbacks
+ * @param {Function} callbacks.onOpened - Called when popup opens: (popupTabId, openerTabId) => void
+ * @param {Function} callbacks.onClosed - Called when popup closes: (popupTabId, openerTabId) => void
+ */
+export function setPopupCallbacks(callbacks) {
+  onPopupOpened = callbacks.onOpened;
+  onPopupClosed = callbacks.onClosed;
 }
 
 /**
@@ -123,6 +142,79 @@ function registerDebuggerListener() {
         req.error = params.errorText;
       }
     }
+
+    // ============================================
+    // POPUP/WINDOW TRACKING via CDP Target domain
+    // ============================================
+
+    if (method === 'Target.targetCreated') {
+      const { targetInfo } = params;
+      console.log(`[POPUP] Target created:`, targetInfo.type, targetInfo.targetId, 'opener:', targetInfo.openerId);
+
+      // Only track page targets (not workers, iframes, etc.)
+      if (targetInfo.type === 'page' && targetInfo.openerId) {
+        // Find which of our attached tabs is the opener
+        // The openerId is a targetId, we need to map it to a tabId
+        (async () => {
+          try {
+            // Get all targets to find the opener's tabId
+            const targets = await new Promise(resolve => {
+              chrome.debugger.getTargets(resolve);
+            });
+
+            const openerTarget = targets.find(t => t.id === targetInfo.openerId);
+            if (openerTarget && openerTarget.tabId && attachedTabs.has(openerTarget.tabId)) {
+              // Find the new popup's tabId
+              const popupTarget = targets.find(t => t.id === targetInfo.targetId);
+              if (popupTarget && popupTarget.tabId) {
+                console.log(`[POPUP] Popup ${popupTarget.tabId} opened by our tab ${openerTarget.tabId}`);
+
+                // Track the relationship
+                popupOpeners.set(popupTarget.tabId, openerTarget.tabId);
+
+                // Notify service worker
+                if (onPopupOpened) {
+                  onPopupOpened(popupTarget.tabId, openerTarget.tabId);
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('[POPUP] Error processing targetCreated:', e.message);
+          }
+        })();
+      }
+    }
+
+    if (method === 'Target.targetDestroyed') {
+      const { targetId } = params;
+      console.log(`[POPUP] Target destroyed:`, targetId);
+
+      // Check if this was a tracked popup
+      (async () => {
+        try {
+          const targets = await new Promise(resolve => {
+            chrome.debugger.getTargets(resolve);
+          });
+
+          // Find if any of our tracked popups match this targetId
+          for (const [popupTabId, openerTabId] of popupOpeners.entries()) {
+            const popupTarget = targets.find(t => t.tabId === popupTabId);
+            if (!popupTarget || popupTarget.id === targetId) {
+              // This popup was closed
+              console.log(`[POPUP] Popup ${popupTabId} (from opener ${openerTabId}) closed`);
+              popupOpeners.delete(popupTabId);
+
+              if (onPopupClosed) {
+                onPopupClosed(popupTabId, openerTabId);
+              }
+              break;
+            }
+          }
+        } catch (e) {
+          console.warn('[POPUP] Error processing targetDestroyed:', e.message);
+        }
+      })();
+    }
   });
 }
 
@@ -183,6 +275,18 @@ export async function ensureDebugger(tabId) {
     await chrome.debugger.sendCommand({ tabId }, 'Network.enable', { maxPostDataSize: 65536 });
     networkEnabledTabs.add(tabId);
 
+    // Enable Target discovery to track popups/new windows
+    if (!targetDiscoveryEnabled.has(tabId)) {
+      try {
+        await chrome.debugger.sendCommand({ tabId }, 'Target.setDiscoverTargets', { discover: true });
+        targetDiscoveryEnabled.add(tabId);
+        console.log(`[DEBUGGER] Target discovery enabled for tab ${tabId}`);
+      } catch (e) {
+        // Some Chrome versions may not support this, continue anyway
+        console.warn(`[DEBUGGER] Target discovery not available: ${e.message}`);
+      }
+    }
+
     attachedTabs.add(tabId);
     await logFn('DEBUGGER', 'Attached to tab', { tabId, totalAttached: attachedTabs.size });
     return true;
@@ -209,6 +313,12 @@ export async function detachDebugger(tabId = null) {
     }
     attachedTabs.delete(tabId);
     networkEnabledTabs.delete(tabId);
+    targetDiscoveryEnabled.delete(tabId);
+    // Clean up any popup relationships involving this tab
+    popupOpeners.delete(tabId);
+    for (const [popupId, openerId] of popupOpeners.entries()) {
+      if (openerId === tabId) popupOpeners.delete(popupId);
+    }
   } else {
     // Detach from all tabs (legacy behavior for UI tasks)
     for (const attachedTabId of attachedTabs) {
@@ -220,7 +330,27 @@ export async function detachDebugger(tabId = null) {
     }
     attachedTabs.clear();
     networkEnabledTabs.clear();
+    targetDiscoveryEnabled.clear();
+    popupOpeners.clear();
   }
+}
+
+/**
+ * Get the opener tab for a popup
+ * @param {number} popupTabId - The popup's tab ID
+ * @returns {number|null} The opener's tab ID, or null if not a tracked popup
+ */
+export function getPopupOpener(popupTabId) {
+  return popupOpeners.get(popupTabId) || null;
+}
+
+/**
+ * Check if a tab is a tracked popup
+ * @param {number} tabId - Tab ID to check
+ * @returns {boolean} True if this is a tracked popup
+ */
+export function isTrackedPopup(tabId) {
+  return popupOpeners.has(tabId);
 }
 
 /**

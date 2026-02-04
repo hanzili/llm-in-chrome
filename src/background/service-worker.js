@@ -21,7 +21,7 @@ import { importCodexCredentials, logoutCodex, getCodexAuthStatus } from './modul
 import { hasHandler, executeToolHandler } from './tool-handlers/index.js';
 import { log, clearLog, saveTaskLogs, initLogging } from './managers/logging-manager.js';
 import { startSession, resetTaskUsage, recordApiCall, recordTaskCompletion, getTaskUsage } from './managers/usage-tracker.js';
-import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking } from './managers/debugger-manager.js';
+import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking, setPopupCallbacks, getPopupOpener, isTrackedPopup } from './managers/debugger-manager.js';
 import { showAgentIndicators, hideAgentIndicators, hideIndicatorsForToolUse, showIndicatorsAfterToolUse } from './managers/indicator-manager.js';
 import { ensureTabGroup, addTabToGroup, validateTabInGroup, isTabManagedByAgent, registerTabCleanupListener, initTabManager } from './managers/tab-manager.js';
 import {
@@ -70,6 +70,10 @@ const agentOpenedTabs = new Set();
 // Track active agent sessions (Set of sessionIds for parallel execution)
 // For UI-triggered tasks (non-MCP), we use a special ID: 'ui-task'
 const activeSessions = new Set();
+
+// Per-session state for MCP tasks (moved here for early access by popup callbacks)
+// Each session has its own chat history, tab, and status
+const mcpSessions = new Map(); // sessionId -> { tabId, task, messages, status, tabStack, ... }
 
 // Legacy compatibility: check if any session is active
 const isAnySessionActive = () => activeSessions.size > 0;
@@ -192,6 +196,69 @@ let networkRequests = [];
 let capturedCaptchaData = new Map();
 
 initDebugger({ consoleMessages, networkRequests, capturedCaptchaData, log });
+
+// ============================================
+// POPUP TRACKING CALLBACKS
+// ============================================
+// When a popup opens (e.g., OAuth flow), shift agent attention to it
+// When popup closes, return attention to the original tab
+
+setPopupCallbacks({
+  onOpened: async (popupTabId, openerTabId) => {
+    console.log(`[POPUP] Shifting attention: popup ${popupTabId} opened by ${openerTabId}`);
+
+    // Find which MCP session owns the opener tab
+    for (const [sessionId, session] of mcpSessions.entries()) {
+      if (session.tabId === openerTabId && session.status === 'running') {
+        // Initialize tabStack if needed
+        if (!session.tabStack) {
+          session.tabStack = [];
+        }
+
+        // Push current tab onto stack and shift to popup
+        session.tabStack.push(session.tabId);
+        session.tabId = popupTabId;
+        session.openedTabs.add(popupTabId);
+
+        // Attach debugger to popup so we can interact with it
+        await ensureDebugger(popupTabId);
+
+        // Show agent indicators on popup
+        await showAgentIndicators(popupTabId);
+
+        console.log(`[POPUP] Session ${sessionId} now focused on popup ${popupTabId} (stack: [${session.tabStack.join(', ')}])`);
+
+        // Notify MCP server about the focus shift
+        sendMcpUpdate(sessionId, 'running', `[Popup opened] Now interacting with popup window. Will return to original tab when done.`);
+        break;
+      }
+    }
+  },
+
+  onClosed: async (popupTabId, openerTabId) => {
+    console.log(`[POPUP] Popup ${popupTabId} closed, returning to ${openerTabId}`);
+
+    // Find which MCP session was using this popup
+    for (const [sessionId, session] of mcpSessions.entries()) {
+      if (session.tabId === popupTabId && session.status === 'running') {
+        // Pop from stack to return to previous tab
+        if (session.tabStack && session.tabStack.length > 0) {
+          const previousTabId = session.tabStack.pop();
+          session.tabId = previousTabId;
+
+          // Show agent indicators on previous tab
+          await showAgentIndicators(previousTabId);
+
+          console.log(`[POPUP] Session ${sessionId} returned to tab ${previousTabId} (stack: [${session.tabStack.join(', ')}])`);
+
+          // Notify MCP server about the return
+          sendMcpUpdate(sessionId, 'running', `[Popup closed] Returned to original tab. Continuing task.`);
+        }
+        break;
+      }
+    }
+  }
+});
 
 // ============================================
 // CONTENT SCRIPT COMMUNICATION
@@ -945,9 +1012,7 @@ chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => 
 // MCP BRIDGE INTEGRATION
 // ============================================
 
-// Per-session state for MCP tasks
-// Each session has its own chat history, tab, and status
-const mcpSessions = new Map(); // sessionId -> { tabId, task, messages, status, createdAt }
+// mcpSessions is defined at top of file (needed early for popup callbacks)
 
 // Session cleanup interval (clean up sessions older than 1 hour)
 const MCP_SESSION_TTL_MS = 60 * 60 * 1000; // 1 hour
@@ -999,6 +1064,7 @@ async function handleMcpStartTask(sessionId, task, url) {
       debugLog: [],       // Debug log for this task
       steps: [],          // Task steps
       openedTabs: new Set(), // Tabs opened by this session
+      tabStack: [],       // Stack for popup navigation (push when popup opens, pop when closes)
       startTime: new Date().toISOString(),
       abortController: new AbortController(), // Per-session abort controller
     });
