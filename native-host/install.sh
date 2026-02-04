@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 OAUTH_SERVER="$SCRIPT_DIR/oauth-server.cjs"
+WRAPPER_SCRIPT="$SCRIPT_DIR/native-host-wrapper.sh"
 
 # Check if Node.js is installed
 echo "Checking prerequisites..."
@@ -31,9 +32,22 @@ fi
 
 echo -e "${GREEN}✓${NC} Node.js found: $(node --version)"
 
+# Get the full path to node (Chrome doesn't use shell, so we need explicit path)
+NODE_PATH=$(which node)
+echo -e "${GREEN}✓${NC} Node path: $NODE_PATH"
+
 # Make the OAuth server executable
 chmod +x "$OAUTH_SERVER"
-echo -e "${GREEN}✓${NC} Made oauth-server.js executable"
+echo -e "${GREEN}✓${NC} Made oauth-server.cjs executable"
+
+# Create/update wrapper script with correct node path
+# (Chrome Native Messaging needs bash shebang, not #!/usr/bin/env node)
+cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+exec "$NODE_PATH" "$OAUTH_SERVER" "\$@"
+EOF
+chmod +x "$WRAPPER_SCRIPT"
+echo -e "${GREEN}✓${NC} Created wrapper script with node path"
 
 # Determine OS and set manifest directory
 if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -55,37 +69,11 @@ echo -e "${GREEN}✓${NC} Manifest directory: $MANIFEST_DIR"
 # Create manifest directory if it doesn't exist
 mkdir -p "$MANIFEST_DIR"
 
-# Extension ID - Chrome Web Store published ID
-CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"
+# Extension IDs
+CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"  # Production (Chrome Web Store)
+DEV_ID="dnajlkacmnpfmilkeialficajdgkkkfo"          # Development (replace with your own if different)
 
-echo ""
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║  Extension ID Configuration                            ║"
-echo "╚════════════════════════════════════════════════════════╝"
-echo ""
-echo "Default (Chrome Web Store): $CHROME_STORE_ID"
-echo ""
-read -p "Press Enter to use default, or paste a custom ID: " CUSTOM_ID
-
-if [ -z "$CUSTOM_ID" ]; then
-    EXTENSION_ID="$CHROME_STORE_ID"
-    echo -e "${GREEN}✓${NC} Using Chrome Web Store ID"
-else
-    EXTENSION_ID=$(echo "$CUSTOM_ID" | xargs)
-    # Validate extension ID format (32 lowercase letters)
-    if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
-        echo -e "${YELLOW}⚠  Warning: Extension ID should be 32 lowercase letters${NC}"
-        echo "  Your input: $EXTENSION_ID"
-        read -p "Continue anyway? (y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            exit 1
-        fi
-    fi
-    echo -e "${GREEN}✓${NC} Using custom ID: $EXTENSION_ID"
-fi
-
-# Create manifest with correct path and extension ID
+# Create manifest with both production and development IDs
 MANIFEST_FILE="$MANIFEST_DIR/com.llm_in_chrome.oauth_host.json"
 
 echo ""
@@ -94,13 +82,16 @@ cat > "$MANIFEST_FILE" << EOF
 {
   "name": "com.llm_in_chrome.oauth_host",
   "description": "OAuth local server for LLM in Chrome extension",
-  "path": "$OAUTH_SERVER",
+  "path": "$WRAPPER_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$EXTENSION_ID/"
+    "chrome-extension://$CHROME_STORE_ID/",
+    "chrome-extension://$DEV_ID/"
   ]
 }
 EOF
+
+echo -e "${GREEN}✓${NC} Configured for both production and development extensions"
 
 if [ -f "$MANIFEST_FILE" ]; then
     echo -e "${GREEN}✓${NC} Created manifest at: $MANIFEST_FILE"

@@ -51,6 +51,14 @@ Shows the agent applying to jobs, unsubscribing from emails in Gmail, and comple
 
 5. The extension icon should appear in your toolbar
 
+6. **Install native host** (for Claude Code/Codex plan support):
+   ```bash
+   cd native-host
+   ./install.sh
+   ```
+
+   > **Note:** The install script includes both production (`iklpkemlmbhemkiojndpbhoakgikpmcd`) and a default development extension ID (`dnajlkacmnpfmilkeialficajdgkkkfo`). If your unpacked extension has a different ID (visible in `chrome://extensions`), edit the `DEV_ID` variable in `install.sh` or `native-host/install.sh` before running.
+
 ### Prerequisites
 
 - Google Chrome (version 120+)

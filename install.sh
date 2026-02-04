@@ -50,49 +50,42 @@ curl -fsSL "$REPO_URL/native-host/oauth-server.cjs" -o "$INSTALL_DIR/oauth-serve
 chmod +x "$INSTALL_DIR/oauth-server.cjs"
 echo -e "${GREEN}✓${NC} Downloaded oauth-server.cjs"
 
-# Extension ID - Chrome Web Store published ID
-CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"
+# Get the full path to node (Chrome doesn't use shell, so we need explicit path)
+NODE_PATH=$(which node)
+echo -e "${GREEN}✓${NC} Node path: $NODE_PATH"
 
-echo ""
-echo "╔════════════════════════════════════════════════════════╗"
-echo "║  Extension ID Configuration                            ║"
-echo "╚════════════════════════════════════════════════════════╝"
-echo ""
-echo "Default (Chrome Web Store): $CHROME_STORE_ID"
-echo ""
-read -p "Press Enter to use default, or paste a custom ID: " CUSTOM_ID
+# Create wrapper script (Chrome Native Messaging needs bash shebang, not env node)
+WRAPPER_SCRIPT="$INSTALL_DIR/native-host-wrapper.sh"
+cat > "$WRAPPER_SCRIPT" << EOF
+#!/bin/bash
+exec "$NODE_PATH" "$INSTALL_DIR/oauth-server.cjs" "\$@"
+EOF
+chmod +x "$WRAPPER_SCRIPT"
+echo -e "${GREEN}✓${NC} Created wrapper script"
 
-if [ -z "$CUSTOM_ID" ]; then
-    EXTENSION_ID="$CHROME_STORE_ID"
-    echo -e "${GREEN}✓${NC} Using Chrome Web Store ID"
-else
-    EXTENSION_ID=$(echo "$CUSTOM_ID" | xargs)
-    # Validate format
-    if [[ ! "$EXTENSION_ID" =~ ^[a-z]{32}$ ]]; then
-        echo -e "${YELLOW}⚠  Warning: ID should be 32 lowercase letters${NC}"
-        read -p "Continue anyway? (y/n) " -n 1 -r
-        echo
-        [[ ! $REPLY =~ ^[Yy]$ ]] && exit 1
-    fi
-    echo -e "${GREEN}✓${NC} Using custom ID: $EXTENSION_ID"
-fi
+# Extension IDs
+CHROME_STORE_ID="iklpkemlmbhemkiojndpbhoakgikpmcd"  # Production (Chrome Web Store)
+DEV_ID="dnajlkacmnpfmilkeialficajdgkkkfo"          # Development (replace with your own if different)
 
 # Create manifest directory
 mkdir -p "$MANIFEST_DIR"
 
-# Create manifest
+# Create manifest pointing to wrapper script (not .cjs directly)
 MANIFEST_FILE="$MANIFEST_DIR/com.llm_in_chrome.oauth_host.json"
 cat > "$MANIFEST_FILE" << EOF
 {
   "name": "com.llm_in_chrome.oauth_host",
   "description": "OAuth local server for LLM in Chrome extension",
-  "path": "$INSTALL_DIR/oauth-server.cjs",
+  "path": "$WRAPPER_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://$EXTENSION_ID/"
+    "chrome-extension://$CHROME_STORE_ID/",
+    "chrome-extension://$DEV_ID/"
   ]
 }
 EOF
+
+echo -e "${GREEN}✓${NC} Configured for both production and development extensions"
 
 echo -e "${GREEN}✓${NC} Created manifest at: $MANIFEST_FILE"
 
