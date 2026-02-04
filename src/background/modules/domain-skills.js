@@ -3,6 +3,17 @@
  * These are injected into the agent's context when visiting matching domains.
  */
 
+/**
+ * Domain-specific skills and best practices for common websites.
+ * These are injected into the agent's context when visiting matching domains.
+ *
+ * Fields:
+ * - domain: The domain to match (e.g., 'reddit.com')
+ * - skill: Best practices text injected into the agent's system prompt
+ * - antiBot: If true, enables human-like simulation for typing, clicking, scrolling
+ *           Use for sites with aggressive bot detection (Reddit, LinkedIn, etc.)
+ */
+
 export const DOMAIN_SKILLS = [
   {
     domain: 'mail.google.com',
@@ -41,19 +52,37 @@ export const DOMAIN_SKILLS = [
 - Use the search bar with qualifiers: 'is:open is:pr', 'is:issue label:bug'`
   },
   {
+    domain: 'reddit.com',
+    antiBot: true,  // Reddit has aggressive bot detection
+    skill: `Reddit UI patterns:
+- Posts are listed in a feed - click on post title to view full post and comments
+- Comments are nested/threaded - each comment has its own reply button underneath
+- Upvote (up arrow) and downvote (down arrow) buttons are to the left of each post/comment
+- To comment, scroll to comment box at top of comments section, or click reply under a specific comment
+- Use the search bar at top to find subreddits or posts
+- r/subredditname format for community names`
+  },
+  {
     domain: 'linkedin.com',
-    skill: `LinkedIn best practices:
+    antiBot: true,  // LinkedIn detects automation
+    skill: `LinkedIn UI patterns:
+
+## Messaging & Connections
+- To message someone: first check if you're connected (1st degree) - if not, send a connection request first
+- Connection request: go to their profile, click 'Connect' button, optionally add a note
+- Once connected, use the 'Message' button on their profile or go to Messaging tab
+- InMail (messaging non-connections) requires Premium subscription
 
 ## Easy Apply Forms
-- **Contact Info page is pre-filled from LinkedIn profile.** Email, phone, and name come from the user's LinkedIn account and cannot be changed. Do not try to modify these fields - just click Next to proceed.
-- **Modal forms may need scrolling** to see all content and buttons. If you can't find a button, scroll down inside the modal.
-- **Use screenshots over read_page** for modals - the accessibility tree often misses modal content.
+- Contact Info page is pre-filled from LinkedIn profile - don't try to modify, just click Next
+- Modal forms may need scrolling to see all content and buttons
+- Use screenshots over read_page for modals - accessibility tree often misses modal content
 
-## General Navigation
-- Job search: Use the Jobs tab, filter by location, experience level, date posted
-- To apply: Click 'Easy Apply' button if available, or 'Apply' to go to external site
-- Profile sections are collapsible - click 'Show all' to expand
-- Connection requests and messages are in the 'My Network' and 'Messaging' tabs`
+## Navigation
+- Main tabs: Home (feed), My Network, Jobs, Messaging, Notifications
+- Job search: Jobs tab → filter by location, experience level, date posted
+- 'Easy Apply' = apply within LinkedIn; 'Apply' = external site
+- Profile sections are collapsible - click 'Show all' to expand`
   },
   {
     domain: 'indeed.com',
@@ -111,21 +140,75 @@ export const DOMAIN_SKILLS = [
   },
   {
     domain: 'twitter.com',
-    skill: `X/Twitter best practices:
-- Compose new post with the 'Post' or compose button
-- Scroll to load more content
-- Click on a post to view full thread and replies
-- Like, repost, reply buttons are below each post
-- Use search with operators: 'from:user', 'to:user', 'filter:media'`
+    antiBot: true,  // Twitter detects automation
+    skill: `X/Twitter UI patterns:
+
+## CRITICAL: Reply Textbox Handling
+- The reply/compose box is a CONTENTEDITABLE div, not a regular input
+- You MUST click inside the textbox FIRST to focus it, THEN type your message
+- If text doesn't appear, click the textbox again and retry typing
+- After typing your message, click the blue "Reply" or "Post" button IMMEDIATELY
+- Don't overthink - once you've typed the message, just click Reply!
+
+## Replying to Tweets (Most Common Task)
+- To find someone's tweets quickly: use search with "from:username" (e.g., from:elonmusk)
+- DON'T endlessly scroll looking for the "perfect" tweet - pick a relevant one and reply
+- Click the speech bubble (💬) icon below a tweet to open the reply composer
+- Type your reply, then click the blue "Reply" button - be decisive!
+- The reply will appear as a thread under the original tweet
+
+## Posting & Composing
+- Compose new post: click the blue "Post" button in sidebar (desktop) or floating button (mobile)
+- The pencil/compose icon opens PUBLIC post composer, NOT direct messages
+- Below each post: reply (speech bubble), repost (arrows), like (heart), share icons
+
+## Direct Messages (DMs)
+- To DM: go to user's PROFILE page, look for "Message" button next to Follow
+- If no Message button visible: user has DMs disabled OR you need Twitter Premium to DM non-followers
+- DO NOT use the compose/pencil button for DMs - that's for public posts only
+- The Messages icon in sidebar shows existing conversations, not for starting new DMs with non-contacts
+
+## Navigation & Search
+- Profile: click on username or profile picture
+- Search operators: 'from:username' (their tweets), 'to:username' (replies to them)
+- Use search URL directly: x.com/search?q=from:username&f=live for recent tweets
+- Timeline shows posts in feed - but search is faster for finding specific user's content`
   },
   {
     domain: 'x.com',
-    skill: `X/Twitter best practices:
-- Compose new post with the 'Post' or compose button
-- Scroll to load more content
-- Click on a post to view full thread and replies
-- Like, repost, reply buttons are below each post
-- Use search with operators: 'from:user', 'to:user', 'filter:media'`
+    antiBot: true,  // Twitter/X detects automation
+    skill: `X/Twitter UI patterns:
+
+## CRITICAL: Reply Textbox Handling
+- The reply/compose box is a CONTENTEDITABLE div, not a regular input
+- You MUST click inside the textbox FIRST to focus it, THEN type your message
+- If text doesn't appear, click the textbox again and retry typing
+- After typing your message, click the blue "Reply" or "Post" button IMMEDIATELY
+- Don't overthink - once you've typed the message, just click Reply!
+
+## Replying to Tweets (Most Common Task)
+- To find someone's tweets quickly: use search with "from:username" (e.g., from:elonmusk)
+- DON'T endlessly scroll looking for the "perfect" tweet - pick a relevant one and reply
+- Click the speech bubble (💬) icon below a tweet to open the reply composer
+- Type your reply, then click the blue "Reply" button - be decisive!
+- The reply will appear as a thread under the original tweet
+
+## Posting & Composing
+- Compose new post: click the blue "Post" button in sidebar (desktop) or floating button (mobile)
+- The pencil/compose icon opens PUBLIC post composer, NOT direct messages
+- Below each post: reply (speech bubble), repost (arrows), like (heart), share icons
+
+## Direct Messages (DMs)
+- To DM: go to user's PROFILE page, look for "Message" button next to Follow
+- If no Message button visible: user has DMs disabled OR you need Twitter Premium to DM non-followers
+- DO NOT use the compose/pencil button for DMs - that's for public posts only
+- The Messages icon in sidebar shows existing conversations, not for starting new DMs with non-contacts
+
+## Navigation & Search
+- Profile: click on username or profile picture
+- Search operators: 'from:username' (their tweets), 'to:username' (replies to them)
+- Use search URL directly: x.com/search?q=from:username&f=live for recent tweets
+- Timeline shows posts in feed - but search is faster for finding specific user's content`
   },
   {
     domain: 'amazon.com',
@@ -337,4 +420,15 @@ export function getDomainSkills(url, userSkills = []) {
   } catch {
     return [];
   }
+}
+
+/**
+ * Check if anti-bot simulation is enabled for a given URL
+ * @param {string} url - The URL to check
+ * @param {Array} userSkills - Optional array of user-defined skills
+ * @returns {boolean} - True if antiBot is enabled for this domain
+ */
+export function isAntiBotEnabled(url, userSkills = []) {
+  const skills = getDomainSkills(url, userSkills);
+  return skills.some(skill => skill.antiBot === true);
 }

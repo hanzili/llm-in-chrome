@@ -1,12 +1,145 @@
 /**
  * CDPHelper - Chrome DevTools Protocol Helper
  * Handles all browser automation via CDP: clicks, typing, screenshots, console/network monitoring
+ *
+ * Anti-Bot Features:
+ * When antiBot=true, actions simulate human-like behavior:
+ * - Typing: Random delays between characters (50-150ms with variance)
+ * - Clicking: Bezier curve mouse movement to target, optional overshoot
+ * - Scrolling: Momentum-based, variable speed
  */
 
 import { KEY_DEFINITIONS } from './key-definitions.js';
 import { MAC_COMMANDS } from './mac-commands.js';
 import { screenshotContextManager } from './screenshot-context.js';
 import { indicatorManager } from '../managers/indicator-manager.js';
+
+// ============================================================================
+// ANTI-BOT CONFIGURATION
+// ============================================================================
+
+const ANTI_BOT_CONFIG = {
+  typing: {
+    baseDelayMs: 80,        // Base delay between characters
+    varianceMs: 40,         // Random variance ±40ms (so 40-120ms range)
+    punctuationPauseMs: 150, // Extra pause after punctuation
+    wordPauseMs: 100,       // Extra pause after space (between words)
+  },
+  mouse: {
+    movementSteps: 25,      // Number of points in Bezier curve
+    movementDurationMs: 300, // Total time for mouse movement
+    overshootRadius: 15,    // Pixels to overshoot target
+    overshootChance: 0.3,   // 30% chance to overshoot
+    preClickDelayMs: 50,    // Pause before clicking after movement
+    clickHoldMs: 80,        // Time between mousedown and mouseup
+    clickHoldVariance: 30,  // Variance for click hold
+  },
+  scroll: {
+    stepCount: 5,           // Number of scroll steps
+    stepDelayMs: 50,        // Delay between scroll steps
+    stepVariance: 20,       // Variance in delay
+  },
+  general: {
+    preActionDelayMs: 100,  // Random pause before any action
+    preActionVariance: 50,  // Variance for pre-action delay
+  },
+};
+
+// ============================================================================
+// ANTI-BOT HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Generate a random delay with variance
+ * @param {number} base - Base delay in ms
+ * @param {number} variance - Variance in ms (±variance)
+ * @returns {number} Random delay
+ */
+function randomDelay(base, variance = 0) {
+  return Math.max(0, base + (Math.random() * 2 - 1) * variance);
+}
+
+/**
+ * Sleep for a random duration
+ * @param {number} base - Base delay in ms
+ * @param {number} variance - Variance in ms
+ */
+async function humanDelay(base, variance = 0) {
+  const delay = randomDelay(base, variance);
+  if (delay > 0) {
+    await new Promise(resolve => setTimeout(resolve, delay));
+  }
+}
+
+/**
+ * Generate a cubic Bezier curve path between two points
+ * Uses random control points for natural-looking movement
+ *
+ * @param {number} startX - Start X coordinate
+ * @param {number} startY - Start Y coordinate
+ * @param {number} endX - End X coordinate
+ * @param {number} endY - End Y coordinate
+ * @param {number} steps - Number of points to generate
+ * @returns {Array<{x: number, y: number}>} Array of points along the curve
+ */
+function generateBezierPath(startX, startY, endX, endY, steps = 25) {
+  // Calculate distance and direction
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  // Generate random control points perpendicular to the line
+  // This creates a natural curved path
+  const spread = Math.min(distance * 0.3, 100); // Curve spread, max 100px
+  const perpX = -dy / (distance || 1); // Perpendicular direction
+  const perpY = dx / (distance || 1);
+
+  // Random offset for control points (same side for smooth curve)
+  const side = Math.random() > 0.5 ? 1 : -1;
+  const offset1 = (Math.random() * 0.5 + 0.25) * spread * side;
+  const offset2 = (Math.random() * 0.5 + 0.25) * spread * side;
+
+  // Control points at ~33% and ~66% along the path
+  const cp1x = startX + dx * 0.33 + perpX * offset1;
+  const cp1y = startY + dy * 0.33 + perpY * offset1;
+  const cp2x = startX + dx * 0.66 + perpX * offset2;
+  const cp2y = startY + dy * 0.66 + perpY * offset2;
+
+  // Generate points along the cubic Bezier curve
+  const points = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const t2 = t * t;
+    const t3 = t2 * t;
+    const mt = 1 - t;
+    const mt2 = mt * mt;
+    const mt3 = mt2 * mt;
+
+    // Cubic Bezier formula: B(t) = (1-t)³P0 + 3(1-t)²tP1 + 3(1-t)t²P2 + t³P3
+    const x = mt3 * startX + 3 * mt2 * t * cp1x + 3 * mt * t2 * cp2x + t3 * endX;
+    const y = mt3 * startY + 3 * mt2 * t * cp1y + 3 * mt * t2 * cp2y + t3 * endY;
+
+    points.push({ x: Math.round(x), y: Math.round(y) });
+  }
+
+  return points;
+}
+
+/**
+ * Calculate overshoot position (slightly past the target)
+ * @param {number} targetX - Target X coordinate
+ * @param {number} targetY - Target Y coordinate
+ * @param {number} radius - Max overshoot radius in pixels
+ * @returns {{x: number, y: number}} Overshoot position
+ */
+function calculateOvershoot(targetX, targetY, radius) {
+  const angle = Math.random() * 2 * Math.PI;
+  const r = radius * Math.sqrt(Math.random()); // sqrt for uniform distribution in circle
+  return {
+    x: Math.round(targetX + r * Math.cos(angle)),
+    y: Math.round(targetY + r * Math.sin(angle)),
+  };
+}
 
 // ============================================================================
 // GLOBAL STATE INITIALIZATION
@@ -336,7 +469,7 @@ class CDPHelper {
   // CLICK (lines 5150-5211)
   // ============================================================================
 
-  async click(tabId, x, y, button = "left", clickCount = 1, modifiers = 0) {
+  async click(tabId, x, y, button = "left", clickCount = 1, modifiers = 0, antiBot = false, startX = null, startY = null) {
     await indicatorManager.hideIndicatorForToolUse(tabId);
 
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -356,19 +489,85 @@ class CDPHelper {
           break;
       }
 
-      // Move mouse first (lines 5170-5177)
-      await this.dispatchMouseEvent(tabId, {
-        type: "mouseMoved",
-        x,
-        y,
-        button: "none",
-        buttons: 0,
-        modifiers,
-      });
+      if (antiBot) {
+        // Pre-action delay
+        await humanDelay(
+          ANTI_BOT_CONFIG.general.preActionDelayMs,
+          ANTI_BOT_CONFIG.general.preActionVariance
+        );
 
-      await new Promise((resolve) => setTimeout(resolve, 100));
+        // Use provided start position or default to origin-ish
+        const fromX = startX ?? Math.round(x * 0.3 + Math.random() * 100);
+        const fromY = startY ?? Math.round(y * 0.3 + Math.random() * 100);
 
-      // Click sequence (lines 5181-5206)
+        let targetX = x;
+        let targetY = y;
+
+        // Maybe overshoot first
+        const shouldOvershoot = Math.random() < ANTI_BOT_CONFIG.mouse.overshootChance;
+        if (shouldOvershoot) {
+          const overshoot = calculateOvershoot(x, y, ANTI_BOT_CONFIG.mouse.overshootRadius);
+          targetX = overshoot.x;
+          targetY = overshoot.y;
+        }
+
+        // Generate Bezier path to target (or overshoot point)
+        const path = generateBezierPath(
+          fromX, fromY, targetX, targetY,
+          ANTI_BOT_CONFIG.mouse.movementSteps
+        );
+
+        // Move along the path with timing
+        const stepDelay = ANTI_BOT_CONFIG.mouse.movementDurationMs / path.length;
+        for (const point of path) {
+          await this.dispatchMouseEvent(tabId, {
+            type: "mouseMoved",
+            x: point.x,
+            y: point.y,
+            button: "none",
+            buttons: 0,
+            modifiers,
+          });
+          await new Promise(resolve => setTimeout(resolve, stepDelay));
+        }
+
+        // If we overshot, now move to actual target with tighter curve
+        if (shouldOvershoot) {
+          const correctionPath = generateBezierPath(
+            targetX, targetY, x, y,
+            Math.round(ANTI_BOT_CONFIG.mouse.movementSteps / 3)
+          );
+          for (const point of correctionPath) {
+            await this.dispatchMouseEvent(tabId, {
+              type: "mouseMoved",
+              x: point.x,
+              y: point.y,
+              button: "none",
+              buttons: 0,
+              modifiers,
+            });
+            await new Promise(resolve => setTimeout(resolve, stepDelay / 2));
+          }
+        }
+
+        // Pre-click pause
+        await humanDelay(ANTI_BOT_CONFIG.mouse.preClickDelayMs, 20);
+
+      } else {
+        // Original behavior: single move
+        await this.dispatchMouseEvent(tabId, {
+          type: "mouseMoved",
+          x,
+          y,
+          button: "none",
+          buttons: 0,
+          modifiers,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      // Click sequence
       for (let i = 1; i <= clickCount; i++) {
         await this.dispatchMouseEvent(tabId, {
           type: "mousePressed",
@@ -380,7 +579,11 @@ class CDPHelper {
           modifiers,
         });
 
-        await new Promise((resolve) => setTimeout(resolve, 12));
+        // Human-like click hold duration
+        const holdTime = antiBot
+          ? randomDelay(ANTI_BOT_CONFIG.mouse.clickHoldMs, ANTI_BOT_CONFIG.mouse.clickHoldVariance)
+          : 12;
+        await new Promise((resolve) => setTimeout(resolve, holdTime));
 
         await this.dispatchMouseEvent(tabId, {
           type: "mouseReleased",
@@ -393,7 +596,7 @@ class CDPHelper {
         });
 
         if (i < clickCount) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, antiBot ? randomDelay(150, 50) : 100));
         }
       }
     } finally {
@@ -414,7 +617,15 @@ class CDPHelper {
     await this.sendCommand(tabId, "Input.insertText", { text });
   }
 
-  async type(tabId, text) {
+  async type(tabId, text, antiBot = false) {
+    // Pre-action delay for anti-bot
+    if (antiBot) {
+      await humanDelay(
+        ANTI_BOT_CONFIG.general.preActionDelayMs,
+        ANTI_BOT_CONFIG.general.preActionVariance
+      );
+    }
+
     for (const char of text) {
       let keyChar = char;
 
@@ -428,6 +639,28 @@ class CDPHelper {
         await this.pressKey(tabId, keyDef, shiftMod);
       } else {
         await this.insertText(tabId, char);
+      }
+
+      // Human-like delays between characters
+      if (antiBot) {
+        let delay = randomDelay(
+          ANTI_BOT_CONFIG.typing.baseDelayMs,
+          ANTI_BOT_CONFIG.typing.varianceMs
+        );
+
+        // Extra pause after punctuation
+        if ('.!?;:'.includes(char)) {
+          delay += ANTI_BOT_CONFIG.typing.punctuationPauseMs;
+        }
+        // Extra pause after space (between words)
+        else if (char === ' ') {
+          delay += randomDelay(
+            ANTI_BOT_CONFIG.typing.wordPauseMs,
+            ANTI_BOT_CONFIG.typing.varianceMs
+          );
+        }
+
+        await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
   }
@@ -529,14 +762,46 @@ class CDPHelper {
   // SCROLL (line 5313-5321)
   // ============================================================================
 
-  async scrollWheel(tabId, x, y, deltaX, deltaY) {
-    await this.dispatchMouseEvent(tabId, {
-      type: "mouseWheel",
-      x,
-      y,
-      deltaX,
-      deltaY,
-    });
+  async scrollWheel(tabId, x, y, deltaX, deltaY, antiBot = false) {
+    if (antiBot && (Math.abs(deltaX) > 50 || Math.abs(deltaY) > 50)) {
+      // Pre-action delay
+      await humanDelay(
+        ANTI_BOT_CONFIG.general.preActionDelayMs,
+        ANTI_BOT_CONFIG.general.preActionVariance
+      );
+
+      // Split scroll into multiple steps with easing (momentum-like)
+      const steps = ANTI_BOT_CONFIG.scroll.stepCount;
+      const stepDeltaX = deltaX / steps;
+      const stepDeltaY = deltaY / steps;
+
+      for (let i = 0; i < steps; i++) {
+        // Ease-out: larger deltas at start, smaller at end (momentum)
+        const easeFactor = 1 - (i / steps) * 0.5; // 1.0 -> 0.5
+
+        await this.dispatchMouseEvent(tabId, {
+          type: "mouseWheel",
+          x,
+          y,
+          deltaX: Math.round(stepDeltaX * easeFactor * 2), // *2 to compensate for ease
+          deltaY: Math.round(stepDeltaY * easeFactor * 2),
+        });
+
+        await humanDelay(
+          ANTI_BOT_CONFIG.scroll.stepDelayMs,
+          ANTI_BOT_CONFIG.scroll.stepVariance
+        );
+      }
+    } else {
+      // Original single scroll
+      await this.dispatchMouseEvent(tabId, {
+        type: "mouseWheel",
+        x,
+        y,
+        deltaX,
+        deltaY,
+      });
+    }
   }
 
   // ============================================================================

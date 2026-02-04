@@ -1,10 +1,15 @@
 /**
  * Computer tool handler
  * Handles screenshot, click, type, scroll, mouse movement, and keyboard actions
+ *
+ * Anti-Bot Support:
+ * When the current tab's URL matches a domain with antiBot: true,
+ * actions will simulate human-like behavior (delays, Bezier curves, etc.)
  */
 
 import { cdpHelper } from '../modules/cdp-helper.js';
 import { screenshotContextManager, scaleCoordinates } from '../modules/screenshot-context.js';
+import { isAntiBotEnabled } from '../modules/domain-skills.js';
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -191,9 +196,10 @@ async function scrollViaJavaScript(tabId, x, y, deltaX, deltaY) {
  * @param {Object} input - Tool input with coordinate/ref, action, modifiers
  * @param {number} clickCount - 1 for single, 2 for double, 3 for triple
  * @param {string} originalUrl - URL for security check
+ * @param {boolean} antiBot - If true, use human-like mouse movement
  * @returns {Promise<{output?: string, error?: string}>}
  */
-async function handleClick(tabId, input, clickCount = 1, originalUrl) {
+async function handleClick(tabId, input, clickCount = 1, originalUrl, antiBot = false) {
   // Ensure tab is active before clicking - required for proper focus
   await chrome.tabs.update(tabId, { active: true });
 
@@ -249,15 +255,16 @@ async function handleClick(tabId, input, clickCount = 1, originalUrl) {
     if (secCheck) {
       return secCheck;
     }
-    await cdpHelper.click(tabId, x, y, button, clickCount, modifiers);
+    await cdpHelper.click(tabId, x, y, button, clickCount, modifiers, antiBot);
     const actionName =
       clickCount === 1 ? "Clicked" : clickCount === 2 ? "Double-clicked" : "Triple-clicked";
+    const mode = antiBot ? " (human-like)" : "";
     return input.ref
-      ? { output: `${actionName} on element ${input.ref}` }
+      ? { output: `${actionName} on element ${input.ref}${mode}` }
       : {
           output: `${actionName} at (${Math.round(input.coordinate[0])}, ${Math.round(
             input.coordinate[1]
-          )})`,
+          )})${mode}`,
         };
   } catch (err) {
     return {
@@ -336,22 +343,24 @@ export async function handleComputer(input) {
     }
 
     const originalUrl = tab.url;
+    // Check if anti-bot simulation is needed for this domain
+    const antiBot = isAntiBotEnabled(originalUrl);
     let result;
 
     switch (toolInput.action) {
       case "left_click":
       case "right_click": {
-        result = await handleClick(tabId, toolInput, 1, originalUrl);
+        result = await handleClick(tabId, toolInput, 1, originalUrl, antiBot);
         break;
       }
 
       case "double_click": {
-        result = await handleClick(tabId, toolInput, 2, originalUrl);
+        result = await handleClick(tabId, toolInput, 2, originalUrl, antiBot);
         break;
       }
 
       case "triple_click": {
-        result = await handleClick(tabId, toolInput, 3, originalUrl);
+        result = await handleClick(tabId, toolInput, 3, originalUrl, antiBot);
         break;
       }
 
@@ -367,8 +376,9 @@ export async function handleComputer(input) {
             // Ensure tab is active before typing - required for apps like Google Docs
             await chrome.tabs.update(tabId, { active: true });
             await new Promise(resolve => setTimeout(resolve, 100)); // Brief delay for focus
-            await cdpHelper.type(tabId, toolInput.text);
-            result = { output: `Typed "${toolInput.text}"` };
+            await cdpHelper.type(tabId, toolInput.text, antiBot);
+            const mode = antiBot ? " (human-like)" : "";
+            result = { output: `Typed "${toolInput.text}"${mode}` };
           }
         } catch (err) {
           result = {
@@ -438,7 +448,7 @@ export async function handleComputer(input) {
 
           if (currentTab.active ?? false) {
             try {
-              const scrollPromise = cdpHelper.scrollWheel(tabId, x, y, deltaX, deltaY);
+              const scrollPromise = cdpHelper.scrollWheel(tabId, x, y, deltaX, deltaY, antiBot);
               const timeoutPromise = new Promise((_, reject) => {
                 setTimeout(() => reject(new Error("Scroll timeout")), 5000);
               });
@@ -471,8 +481,9 @@ export async function handleComputer(input) {
             }
           })();
 
+          const scrollMode = antiBot ? " (human-like)" : "";
           result = {
-            output: `Scrolled ${direction} by ${amount} ticks at (${x}, ${y})`,
+            output: `Scrolled ${direction} by ${amount} ticks at (${x}, ${y})${scrollMode}`,
             ...(screenshotResult && {
               base64Image: screenshotResult.base64Image,
               imageFormat: screenshotResult.imageFormat,
