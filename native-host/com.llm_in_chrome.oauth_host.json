@@ -1,7 +1,7 @@
 {
   "name": "com.llm_in_chrome.oauth_host",
-  "description": "OAuth local server for LLM in Chrome extension",
-  "path": "/REPLACE_WITH_ACTUAL_PATH/oauth-server.cjs",
+  "description": "Native bridge for LLM in Chrome extension (IPC between MCP server and extension)",
+  "path": "/REPLACE_WITH_ACTUAL_PATH/native-bridge.cjs",
   "type": "stdio",
   "allowed_origins": [
     "chrome-extension://iklpkemlmbhemkiojndpbhoakgikpmcd/"

@@ -143,10 +143,34 @@ export function isClaudeProvider() {
 }
 
 /**
+ * Model tier mapping - maps tier names to specific model IDs
+ * This allows agents to request "smart" or "fast" without knowing exact model names
+ */
+const MODEL_TIER_MAP = {
+  fast: 'claude-haiku-4-5-20251001',      // Quick, cheap - good for browser execution
+  smart: 'claude-sonnet-4-20250514',      // Balanced - good for planning, analysis
+  powerful: 'claude-opus-4-5-20251101',   // Best quality - good for complex reasoning
+};
+
+/**
+ * Codex model tier mapping - for OpenAI Codex (ChatGPT Pro/Plus)
+ */
+const CODEX_MODEL_TIER_MAP = {
+  fast: 'gpt-5.1-mini',                   // Quick - good for simple tasks
+  smart: 'gpt-5.1-codex',                 // Balanced - good for planning
+  powerful: 'gpt-5.1-codex-max',          // Best quality - complex reasoning
+};
+
+/**
  * Simple LLM API call (for quick tasks like summarization, find tool, etc.)
+ * Routes through native host to use keychain credentials (same as streaming API).
+ *
  * Supports two call signatures:
  * 1. callLLMSimple(prompt, maxTokens) - simple string prompt
- * 2. callLLMSimple({ messages, maxTokens }) - full messages array
+ * 2. callLLMSimple({ messages, maxTokens, modelTier }) - full messages array with options
+ *
+ * modelTier: "fast" (Haiku), "smart" (Sonnet), "powerful" (Opus)
+ * If modelTier not specified, uses user's configured default model.
  *
  * Returns the full API response when using messages array, or just text when using string prompt.
  */
@@ -156,12 +180,14 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   // Support both call signatures
   let messages;
   let maxTokens;
+  let modelTier;
   let returnFullResponse = false;
 
   if (typeof promptOrOptions === 'object' && promptOrOptions.messages) {
-    // New signature: { messages, maxTokens }
+    // New signature: { messages, maxTokens, modelTier }
     messages = promptOrOptions.messages;
     maxTokens = promptOrOptions.maxTokens || 800;
+    modelTier = promptOrOptions.modelTier;
     returnFullResponse = true;
   } else {
     // Legacy signature: (prompt, maxTokens)
@@ -169,64 +195,101 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
     maxTokens = maxTokensArg;
   }
 
-  const makeRequest = async (headers) => {
-    return fetch(config.apiBaseUrl, {
-      method: 'POST',
-      headers: headers,
-      body: JSON.stringify({
-        model: config.model,  // Use user's selected model
-        max_tokens: maxTokens,
-        messages: messages,
-      }),
-    });
-  };
+  // Determine which model to use
+  // Priority: modelTier override > user's configured model
+  const modelToUse = modelTier && MODEL_TIER_MAP[modelTier]
+    ? MODEL_TIER_MAP[modelTier]
+    : config.model;
 
-  let headers = await getApiHeaders();
-  let response = await makeRequest(headers);
-
-  // Handle 401 - try refreshing OAuth token and retry once
-  if (response.status === 401 && config.authMethod === 'oauth') {
-    console.log('[API] callLLMSimple got 401, attempting token refresh...');
-    let refreshFailed = false;
-    let refreshError = null;
-
-    try {
-      const tokens = await refreshAccessToken();
-      if (tokens) {
-        // Save the new tokens
-        await chrome.storage.local.set({
-          oauthAccessToken: tokens.accessToken,
-          oauthRefreshToken: tokens.refreshToken,
-          oauthExpiresAt: Date.now() + (tokens.expiresIn * 1000)
-        });
-        headers = await getApiHeaders(); // Get fresh headers with new token
-        response = await makeRequest(headers);
-        console.log('[API] Token refresh successful, retried request');
-      } else {
-        refreshFailed = true;
-        refreshError = 'Token refresh returned null';
-      }
-    } catch (err) {
-      refreshFailed = true;
-      refreshError = err.message || 'Unknown refresh error';
-      console.error('[API] Token refresh failed:', err);
-    }
-
-    // If refresh failed and response is still 401, throw descriptive error
-    if (refreshFailed && !response.ok) {
-      throw new Error(`Authentication failed: OAuth token expired and refresh failed (${refreshError}). Please re-authenticate.`);
-    }
+  if (modelTier) {
+    console.log(`[API] callLLMSimple: Using model tier "${modelTier}" → ${modelToUse}`);
   }
 
-  if (!response.ok) throw new Error(`API error: ${response.status}`);
+  // Build request body (non-streaming)
+  const requestBody = {
+    model: modelToUse,
+    max_tokens: maxTokens,
+    messages: messages,
+    stream: false,  // Non-streaming request
+  };
 
-  const result = await response.json();
+  // Use Anthropic API directly (native host will add credentials from keychain)
+  const apiUrl = 'https://api.anthropic.com/v1/messages';
+
+  console.log(`[API] callLLMSimple: Routing through native host for keychain credentials`);
+
+  // Route through native host (which loads credentials from keychain)
+  const result = await callLLMSimpleViaProxy(apiUrl, requestBody);
 
   // Return full response for messages-based calls, just text for simple prompts
   if (returnFullResponse) {
     return result;
   }
   return result.content?.find(b => b.type === 'text')?.text || '';
+}
+
+/**
+ * Make non-streaming API call through native host proxy
+ * Uses keychain credentials (same as streaming API)
+ * @private
+ */
+async function callLLMSimpleViaProxy(apiUrl, requestBody) {
+  const TIMEOUT_MS = 60000; // 60 second timeout for non-streaming
+
+  return new Promise((resolve, reject) => {
+    const port = getNativeHostPort();
+    let settled = false;
+
+    const timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('LLM request timed out after 60 seconds'));
+      }
+    }, TIMEOUT_MS);
+
+    const messageListener = (message) => {
+      if (settled) return;
+
+      if (message.type === 'api_response') {
+        // Non-streaming response from native host
+        settled = true;
+        clearTimeout(timeoutId);
+        port.onMessage.removeListener(messageListener);
+
+        // Check for HTTP errors
+        if (message.status !== 200) {
+          reject(new Error(`API error: ${message.status} - ${message.body?.substring(0, 200)}`));
+          return;
+        }
+
+        // Parse the JSON response body
+        try {
+          const parsed = JSON.parse(message.body);
+          resolve(parsed);
+        } catch (e) {
+          reject(new Error(`Failed to parse API response: ${e.message}`));
+        }
+      } else if (message.type === 'api_error') {
+        settled = true;
+        clearTimeout(timeoutId);
+        port.onMessage.removeListener(messageListener);
+        reject(new Error(message.error || 'API call failed'));
+      }
+    };
+
+    port.onMessage.addListener(messageListener);
+
+    // Send request to native host
+    port.postMessage({
+      type: 'proxy_api_call',
+      data: {
+        url: apiUrl,
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(requestBody)
+      }
+    });
+  });
 }
 
 /**
@@ -433,6 +496,304 @@ async function callLLMThroughProxyOnce(messages, onTextChunk = null, log = () =>
   });
 
   return Promise.race([apiPromise, timeoutPromise]);
+}
+
+/**
+ * Simple LLM call through proxy WITHOUT tools
+ * Used by MCP for Planning Agent, Explorer Agent, etc.
+ * Routes through native host which uses keychain credentials.
+ *
+ * @param {Array} messages - Conversation messages
+ * @param {number} maxTokens - Maximum tokens in response
+ * @returns {Promise<Object>} Full API response
+ */
+export async function callLLMSimpleViaProxyNoTools(messages, maxTokens = 2000) {
+  await loadConfig();
+
+  const PROXY_TIMEOUT_MS = 60000; // 60 seconds for simple requests
+
+  // Build simple request body without tools
+  const requestBody = {
+    model: config.model,
+    max_tokens: maxTokens,
+    messages: messages,
+    stream: false,  // Non-streaming for simple requests
+  };
+
+  const apiUrl = 'https://api.anthropic.com/v1/messages';
+  const requestBodyStr = JSON.stringify(requestBody);
+
+  console.log('[API] callLLMSimpleViaProxyNoTools: Sending request without tools');
+
+  const apiPromise = new Promise((resolve, reject) => {
+    const port = getNativeHostPort();
+    let settled = false;
+
+    const messageListener = (message) => {
+      if (settled) return;
+
+      if (message.type === 'api_response') {
+        settled = true;
+        port.onMessage.removeListener(messageListener);
+
+        if (message.status !== 200) {
+          reject(new Error(`API error: ${message.status} - ${message.body?.substring(0, 200)}`));
+          return;
+        }
+
+        try {
+          const result = JSON.parse(message.body);
+          console.log('[API] callLLMSimpleViaProxyNoTools: Got response', {
+            stopReason: result.stop_reason,
+            contentBlocks: result.content?.length,
+            usage: result.usage
+          });
+          resolve(result);
+        } catch (err) {
+          reject(new Error(`Failed to parse API response: ${err.message}`));
+        }
+      } else if (message.type === 'api_error') {
+        settled = true;
+        port.onMessage.removeListener(messageListener);
+        reject(new Error(message.error || 'API call failed'));
+      } else if (message.type === 'tokens_refreshed') {
+        // Token was refreshed, native host will retry - just wait
+        console.log('[API] callLLMSimpleViaProxyNoTools: Tokens refreshed, waiting for retry');
+      }
+    };
+
+    port.onMessage.addListener(messageListener);
+
+    // Send request to native host
+    port.postMessage({
+      type: 'proxy_api_call',
+      data: {
+        url: apiUrl,
+        method: 'POST',
+        headers: {},
+        body: requestBodyStr
+      }
+    });
+  });
+
+  // Wrap with timeout
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Simple LLM request timed out after ${PROXY_TIMEOUT_MS / 1000} seconds`));
+    }, PROXY_TIMEOUT_MS);
+  });
+
+  return Promise.race([apiPromise, timeoutPromise]);
+}
+
+/**
+ * Simple LLM call through proxy using Codex (ChatGPT Pro/Plus)
+ * Uses Responses API format. Routes through native host which uses ~/.codex/auth.json.
+ *
+ * @param {Array} messages - Conversation messages (Anthropic format, will be converted)
+ * @param {number} maxTokens - Maximum tokens in response
+ * @param {string} modelTier - Model tier: 'fast', 'smart', or 'powerful'
+ * @param {string} instructions - System instructions (optional, defaults to general assistant)
+ * @returns {Promise<Object>} API response in Anthropic-compatible format
+ */
+export async function callLLMSimpleViaCodex(messages, maxTokens = 2000, modelTier = 'smart', instructions = null) {
+  const PROXY_TIMEOUT_MS = 90000; // 90 seconds for Codex (can be slower)
+
+  // Map model tier to Codex model
+  const model = CODEX_MODEL_TIER_MAP[modelTier] || CODEX_MODEL_TIER_MAP.smart;
+
+  // Convert messages to Codex Responses API "input" format
+  const input = convertMessagesToCodexInput(messages);
+
+  // Default instructions if not provided (required by Codex API)
+  const systemInstructions = instructions || 'You are a helpful assistant. Be concise and direct in your responses.';
+
+  // Build Codex Responses API request body
+  const requestBody = {
+    model: model,
+    input: input,
+    instructions: systemInstructions,  // Required by Codex API
+    store: false,    // Required by Codex API
+    stream: true,    // Codex backend requires stream=true even for "non-streaming" use
+  };
+
+  const apiUrl = 'https://chatgpt.com/backend-api/codex/responses';
+  const requestBodyStr = JSON.stringify(requestBody);
+
+  console.log('[API] callLLMSimpleViaCodex: Sending request', { model, modelTier, inputItems: input.length });
+
+  const apiPromise = new Promise((resolve, reject) => {
+    const port = getNativeHostPort();
+    let settled = false;
+    let accumulatedText = '';
+    let usage = null;
+
+    const messageListener = (message) => {
+      if (settled) return;
+
+      if (message.type === 'stream_chunk') {
+        // Handle Responses API streaming events
+        const event = message.data;
+
+        if (event.type === 'response.output_text.delta') {
+          // Text streaming
+          accumulatedText += event.delta || '';
+        } else if (event.type === 'response.completed') {
+          // Final response with usage
+          const response = event.response;
+          if (response?.usage) {
+            usage = response.usage;
+          }
+          // Extract text from completed response if we missed streaming
+          if (!accumulatedText && response?.output) {
+            for (const item of response.output) {
+              if (item.type === 'message' && item.content) {
+                for (const part of item.content) {
+                  if (part.type === 'output_text') {
+                    accumulatedText += part.text || '';
+                  }
+                }
+              }
+            }
+          }
+        }
+      } else if (message.type === 'stream_end') {
+        settled = true;
+        port.onMessage.removeListener(messageListener);
+
+        // Build Anthropic-compatible response format
+        const result = {
+          content: [{ type: 'text', text: accumulatedText }],
+          stop_reason: 'end_turn',
+          usage: usage
+        };
+
+        console.log('[API] callLLMSimpleViaCodex: Got response', {
+          textLength: accumulatedText.length,
+          usage: usage
+        });
+
+        resolve(result);
+      } else if (message.type === 'api_response') {
+        settled = true;
+        port.onMessage.removeListener(messageListener);
+
+        if (message.status >= 400) {
+          reject(new Error(`Codex API error: ${message.status} - ${message.body?.substring(0, 200)}`));
+          return;
+        }
+
+        try {
+          const response = JSON.parse(message.body);
+          // Normalize Codex response to Anthropic format
+          const result = normalizeCodexResponse(response);
+          resolve(result);
+        } catch (err) {
+          reject(new Error(`Failed to parse Codex response: ${err.message}`));
+        }
+      } else if (message.type === 'api_error') {
+        settled = true;
+        port.onMessage.removeListener(messageListener);
+        reject(new Error(message.error || 'Codex API call failed'));
+      }
+    };
+
+    port.onMessage.addListener(messageListener);
+
+    // Send request to native host
+    port.postMessage({
+      type: 'proxy_api_call',
+      data: {
+        url: apiUrl,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: requestBodyStr
+      }
+    });
+  });
+
+  // Wrap with timeout
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => {
+      reject(new Error(`Codex request timed out after ${PROXY_TIMEOUT_MS / 1000} seconds`));
+    }, PROXY_TIMEOUT_MS);
+  });
+
+  return Promise.race([apiPromise, timeoutPromise]);
+}
+
+/**
+ * Convert Anthropic-style messages to Codex Responses API input format
+ * @private
+ */
+function convertMessagesToCodexInput(messages) {
+  const input = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      // User message
+      const text = typeof msg.content === 'string'
+        ? msg.content
+        : msg.content.map(b => b.text || '').join('\n');
+
+      input.push({
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text }]
+      });
+    } else if (msg.role === 'assistant') {
+      // Assistant message
+      const text = typeof msg.content === 'string'
+        ? msg.content
+        : msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+
+      if (text.trim()) {
+        input.push({
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text }]
+        });
+      }
+    }
+  }
+
+  return input;
+}
+
+/**
+ * Normalize Codex Responses API response to Anthropic format
+ * @private
+ */
+function normalizeCodexResponse(response) {
+  const content = [];
+  let stopReason = 'end_turn';
+
+  if (response.output) {
+    for (const item of response.output) {
+      if (item.type === 'message' && item.role === 'assistant') {
+        for (const part of item.content || []) {
+          if (part.type === 'output_text' && part.text) {
+            content.push({ type: 'text', text: part.text });
+          }
+        }
+      }
+    }
+
+    if (response.status === 'incomplete') {
+      stopReason = 'max_tokens';
+    }
+  }
+
+  // Ensure content is never empty
+  if (content.length === 0) {
+    content.push({ type: 'text', text: '' });
+  }
+
+  return {
+    content,
+    stop_reason: stopReason,
+    usage: response.usage
+  };
 }
 
 /**

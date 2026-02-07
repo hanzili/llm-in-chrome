@@ -31,6 +31,7 @@ import {
   handleTurnAnswerStart,
   handleSolveCaptcha,
   handleResizeWindow,
+  handleGetInfo,
 } from './agent-tool.js';
 
 /**
@@ -56,6 +57,7 @@ export const toolHandlers = {
   turn_answer_start: handleTurnAnswerStart,
   solve_captcha: handleSolveCaptcha,
   resize_window: handleResizeWindow,
+  get_info: handleGetInfo,
 };
 
 /**

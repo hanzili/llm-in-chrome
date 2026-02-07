@@ -479,6 +479,37 @@ export const TOOL_DEFINITIONS = [
       type: 'ephemeral',
     },
   },
+
+  {
+    name: 'get_info',
+    description: `Search task memory for specific information needed to fill forms.
+
+BEFORE using this tool: Check the <system-reminder> tags in the conversation first!
+Task context is often already provided there. Only use get_info if the info isn't in the reminders.
+
+The query should describe what information you need in natural language.
+
+Examples:
+- "product description"
+- "pricing information"
+- "company website URL"
+- "logo file path"
+
+If get_info returns "not found":
+1. Check <system-reminder> tags again (you might have missed it)
+2. If truly missing, ASK THE USER: "I need [field] but don't have it. What should I put?"
+3. Do NOT call get_info repeatedly for the same missing info`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Natural language description of the information you need (e.g., "product description", "pricing", "company website URL")',
+        },
+      },
+      required: ['query'],
+    },
+  },
 ];
 
 /**

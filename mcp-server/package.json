@@ -10,7 +10,8 @@
   },
   "type": "module",
   "bin": {
-    "llm-in-chrome-mcp": "./dist/index.js"
+    "llm-in-chrome-mcp": "./dist/index.js",
+    "llm-browser": "./dist/cli.js"
   },
   "files": [
     "dist",
@@ -19,10 +20,14 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "cli": "node dist/cli.js",
+    "test": "npx tsx test/test-agents.ts",
+    "test:live": "npx tsx test/test-live.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.3"
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "mem0ai": "^2.2.2"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

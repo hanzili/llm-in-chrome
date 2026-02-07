@@ -671,7 +671,6 @@ function useConfig() {
 function useChat() {
   const [messages, setMessages] = d([]);
   const [isRunning, setIsRunning] = d(false);
-  const [askBeforeActing] = d(false);
   const [attachedImages, setAttachedImages] = d([]);
   const [sessionTabGroupId, setSessionTabGroupId] = d(null);
   const [pendingPlan, setPendingPlan] = d(null);
@@ -814,7 +813,7 @@ function useChat() {
         payload: {
           tabId: tab.id,
           task: text,
-          askBeforeActing,
+          askBeforeActing: false,
           images: imagesToSend,
           tabGroupId: sessionTabGroupId
         }
@@ -827,7 +826,7 @@ function useChat() {
       }]);
       setIsRunning(false);
     }
-  }, [isRunning, attachedImages, askBeforeActing, sessionTabGroupId]);
+  }, [isRunning, attachedImages, sessionTabGroupId]);
   const stopTask = q(() => {
     chrome.runtime.sendMessage({ type: "STOP_TASK" }).catch(() => {
     });
@@ -1507,6 +1506,16 @@ function ProvidersTab({ localKeys, setLocalKeys, selectedProvider, setSelectedPr
           placeholder: "Enter API key..."
         }
       )
+    ] }),
+    /* @__PURE__ */ u$1("hr", {}),
+    /* @__PURE__ */ u$1("div", { class: "provider-section", children: [
+      /* @__PURE__ */ u$1("h4", { children: "MCP Server" }),
+      /* @__PURE__ */ u$1("p", { class: "provider-desc", children: [
+        "Control this browser from Claude Code or any MCP client.",
+        " ",
+        /* @__PURE__ */ u$1("a", { href: "https://github.com/hanzili/llm-in-chrome#mcp-server-integration", target: "_blank", children: "Setup guide" })
+      ] }),
+      /* @__PURE__ */ u$1("code", { class: "install-cmd", children: "npm install -g llm-in-chrome-mcp" })
     ] })
   ] });
 }

@@ -25,8 +25,15 @@ import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNe
 import { showAgentIndicators, hideAgentIndicators, hideIndicatorsForToolUse, showIndicatorsAfterToolUse } from './managers/indicator-manager.js';
 import { ensureTabGroup, addTabToGroup, validateTabInGroup, isTabManagedByAgent, registerTabCleanupListener, initTabManager } from './managers/tab-manager.js';
 import {
-  initMcpBridge, startMcpPolling, sendMcpUpdate, sendMcpComplete, sendMcpError, sendMcpScreenshot, isMcpSession
+  initMcpBridge, startMcpPolling, sendMcpUpdate, sendMcpComplete, sendMcpError, sendMcpScreenshot, isMcpSession, queryMemory
 } from './modules/mcp-bridge.js';
+
+// ============================================
+// CONSTANTS
+// ============================================
+
+// Maximum number of concurrent task windows (each task gets its own window)
+const MAX_CONCURRENT_TASK_WINDOWS = 5;
 
 // ============================================
 // STATE
@@ -340,9 +347,10 @@ function enhanceErrorMessage(errorMessage) {
  * @param {string} [toolInput.action] - Action to perform (for computer tool)
  * @param {string} [toolInput.url] - URL to navigate to (for navigate tool)
  * @param {number|null} [sessionTabGroupId] - Current session tab group ID (from client)
+ * @param {Object|null} [mcpSession] - MCP session with context for get_info tool
  * @returns {Promise<Object|string>} Tool execution result or error message
  */
-async function executeTool(toolName, toolInput, sessionTabGroupId = null) {
+async function executeTool(toolName, toolInput, sessionTabGroupId = null, mcpSession = null) {
   await log('TOOL', `Executing: ${toolName}`, toolInput);
   const tabId = toolInput.tabId;
 
@@ -396,6 +404,8 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null) {
       capturedCaptchaData,
       askBeforeActing,
       setPendingPlanResolve: (resolver) => { pendingPlanResolve = resolver; },
+      mcpSession,  // For get_info tool to access task context
+      queryMemory, // For get_info tool to query Mem0 via MCP server
     };
     return await executeToolHandler(toolName, toolInput, deps);
   }
@@ -480,6 +490,17 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     type: 'text',
     text: `<system-reminder>${JSON.stringify(tabInfo)}</system-reminder>`,
   });
+
+  // Add MCP task context if provided (for filling forms, making decisions)
+  // This context contains information the agent needs to complete the task
+  if (mcpSession?.context) {
+    userContent.push({
+      type: 'text',
+      text: `<system-reminder>Task context (use this information when filling forms or making decisions):
+${mcpSession.context}</system-reminder>`,
+    });
+    await log('MCP', 'Task context injected', { contextLength: mcpSession.context.length });
+  }
 
   // Add planning mode reminder if askBeforeActing is enabled AND this is a new conversation
   // IMPORTANT: Only add for Claude models - update_plan is Claude-specific and filtered out for other providers
@@ -595,7 +616,7 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
     for (const toolUse of toolUses) {
       onUpdate({ step: steps, status: 'executing', tool: toolUse.name, input: toolUse.input });
 
-      const result = await executeTool(toolUse.name, toolUse.input, sessionTabGroupId);
+      const result = await executeTool(toolUse.name, toolUse.input, sessionTabGroupId, mcpSession);
 
       // Log structured tool result
       const isScreenshot = result && result.base64Image;
@@ -1028,33 +1049,53 @@ setInterval(() => {
 
 /**
  * Start a task from MCP server
+ * @param {string} sessionId - Unique session identifier
+ * @param {string} task - Task description
+ * @param {string} [url] - Optional starting URL
+ * @param {string} [context] - Optional task context (info needed to complete the task)
  */
-async function handleMcpStartTask(sessionId, task, url) {
-  console.log(`[MCP] Starting task: ${sessionId}`, { task, url });
+async function handleMcpStartTask(sessionId, task, url, context) {
+  console.log(`[MCP] Starting task: ${sessionId}`, { task, url, hasContext: !!context });
 
   try {
-    // Get or create a tab for this task
+    // Check concurrent task window limit
+    const activeTaskWindows = Array.from(mcpSessions.values())
+      .filter(s => s.windowId && s.status === 'running')
+      .length;
+
+    if (activeTaskWindows >= MAX_CONCURRENT_TASK_WINDOWS) {
+      sendMcpError(sessionId, `Max concurrent tasks (${MAX_CONCURRENT_TASK_WINDOWS}) reached. Wait for a task to complete or stop one.`);
+      return;
+    }
+
+    // Create a dedicated window for this task (enables true parallel execution)
     let tabId;
+    let windowId;
+
+    // Create new window - each task gets isolation
+    const startUrl = url || 'about:blank';
+    const window = await chrome.windows.create({
+      url: startUrl,
+      type: 'normal',
+      focused: false,  // Don't steal focus from user's current work
+      state: 'normal'
+    });
+    windowId = window.id;
+    tabId = window.tabs[0].id;
+    console.log(`[MCP] Created task window ${windowId} with tab ${tabId} for session ${sessionId}`);
+
+    // Wait for page to load if URL was provided
     if (url) {
-      // Create new tab with the URL
-      const tab = await chrome.tabs.create({ url, active: true });
-      tabId = tab.id;
-      // Wait for page to load
       await new Promise(resolve => setTimeout(resolve, 2000));
-    } else {
-      // Use the current active tab
-      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!activeTab) {
-        sendMcpError(sessionId, 'No active tab found');
-        return;
-      }
-      tabId = activeTab.id;
     }
 
     // Create session with per-session state (enables parallel execution)
     mcpSessions.set(sessionId, {
+      sessionId,          // Store sessionId for Mem0 lookup
       tabId,
+      windowId,           // Track window for cleanup
       task,
+      context,            // Task context for memory/info lookup
       messages: [],       // Per-session chat history
       status: 'running',
       cancelled: false,   // Per-session cancellation flag
@@ -1125,14 +1166,31 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
       // Debug: log to verify sessionId
       console.log('[SW Debug] Sending MCP update:', { sessionId, status: update.status, tool: update.tool });
 
-      if (update.status === 'tool_use' && update.tool) {
-        // Format: "Using read_page" or "Using computer: left_click"
-        const toolDesc = update.text ? `${update.tool}: ${update.text.substring(0, 50)}` : update.tool;
-        sendMcpUpdate(sessionId, 'running', `Using ${toolDesc}`);
+      if ((update.status === 'executing' || update.status === 'executed') && update.tool) {
+        // Format: "Using read_page" or "Using computer: click at (100, 200)"
+        let toolDesc = update.tool;
+        if (update.status === 'executing') {
+          // Include input details for more context
+          if (update.input?.action) {
+            toolDesc = `${update.tool}: ${update.input.action}`;
+            if (update.input.coordinate) {
+              toolDesc += ` at (${update.input.coordinate[0]}, ${update.input.coordinate[1]})`;
+            }
+          } else if (update.input?.selector) {
+            toolDesc = `${update.tool}: ${update.input.selector.substring(0, 40)}`;
+          } else if (update.input?.url) {
+            toolDesc = `${update.tool}: ${update.input.url.substring(0, 50)}`;
+          } else if (update.input?.text) {
+            toolDesc = `${update.tool}: "${update.input.text.substring(0, 30)}"`;
+          }
+          sendMcpUpdate(sessionId, 'running', `[browser_agent:${update.tool}] ${toolDesc}`);
+        } else if (update.status === 'executed' && update.result) {
+          sendMcpUpdate(sessionId, 'running', `[browser_agent:${update.tool}] Done: ${update.result.substring(0, 80)}`);
+        }
       } else if (update.status === 'thinking') {
-        sendMcpUpdate(sessionId, 'running', 'thinking');
+        sendMcpUpdate(sessionId, 'running', '[browser_agent:thinking]');
       } else if (update.status === 'message') {
-        sendMcpUpdate(sessionId, 'running', update.text);
+        sendMcpUpdate(sessionId, 'running', `[browser_agent:message] ${update.text}`);
       }
 
       // Also send to sidepanel if open
@@ -1179,6 +1237,17 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
       steps: currentTask.steps.length
     });
 
+    // Clean up task window (each task gets its own window)
+    if (session.windowId) {
+      try {
+        await chrome.windows.remove(session.windowId);
+        console.log(`[MCP] Closed task window ${session.windowId} for session ${sessionId}`);
+      } catch (e) {
+        // Window may have been closed manually by user
+        console.log(`[MCP] Window ${session.windowId} already closed`);
+      }
+    }
+
   } catch (error) {
     await detachDebugger(tabId);  // Only detach this tab (parallel execution)
     activeSessions.delete(sessionId);  // Mark this session as inactive
@@ -1218,6 +1287,17 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
     } else {
       sendMcpError(sessionId, error.message);
     }
+
+    // Clean up task window on error/cancel
+    if (session.windowId) {
+      try {
+        await chrome.windows.remove(session.windowId);
+        console.log(`[MCP] Closed task window ${session.windowId} for session ${sessionId}`);
+      } catch (e) {
+        // Window may have been closed manually by user
+        console.log(`[MCP] Window ${session.windowId} already closed`);
+      }
+    }
   }
 }
 
@@ -1256,7 +1336,7 @@ async function handleMcpSendMessage(sessionId, message) {
 /**
  * Stop an MCP task
  */
-function handleMcpStopTask(sessionId, remove = false) {
+async function handleMcpStopTask(sessionId, remove = false) {
   console.log(`[MCP] Stopping task: ${sessionId}, remove: ${remove}`);
 
   const session = mcpSessions.get(sessionId);
@@ -1279,6 +1359,16 @@ function handleMcpStopTask(sessionId, remove = false) {
   }
 
   if (remove) {
+    // Clean up task window before removing session
+    if (session.windowId) {
+      try {
+        await chrome.windows.remove(session.windowId);
+        console.log(`[MCP] Closed task window ${session.windowId} for session ${sessionId}`);
+      } catch (e) {
+        // Window may have been closed manually by user
+        console.log(`[MCP] Window ${session.windowId} already closed`);
+      }
+    }
     // Delete session completely - chat history gone
     console.log(`[MCP] Removing session: ${sessionId}`);
     mcpSessions.delete(sessionId);

@@ -1,12 +1,13 @@
 #!/bin/bash
 
-# OAuth Native Messaging Host Installation Script
-# Installs the local OAuth server for Chrome extension
+# Native Bridge Installation Script
+# Installs the native messaging host for LLM in Chrome extension
+# (Enables IPC between MCP server and Chrome extension)
 
 set -e
 
 echo "╔════════════════════════════════════════════════════════╗"
-echo "║  LLM in Chrome - OAuth Native Host Installer          ║"
+echo "║  LLM in Chrome - Native Bridge Installer              ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
 
@@ -18,7 +19,7 @@ NC='\033[0m' # No Color
 
 # Get the directory where this script is located
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-OAUTH_SERVER="$SCRIPT_DIR/oauth-server.cjs"
+NATIVE_BRIDGE="$SCRIPT_DIR/native-bridge.cjs"
 WRAPPER_SCRIPT="$SCRIPT_DIR/native-host-wrapper.sh"
 
 # Check if Node.js is installed
@@ -36,15 +37,15 @@ echo -e "${GREEN}✓${NC} Node.js found: $(node --version)"
 NODE_PATH=$(which node)
 echo -e "${GREEN}✓${NC} Node path: $NODE_PATH"
 
-# Make the OAuth server executable
-chmod +x "$OAUTH_SERVER"
-echo -e "${GREEN}✓${NC} Made oauth-server.cjs executable"
+# Make the native bridge executable
+chmod +x "$NATIVE_BRIDGE"
+echo -e "${GREEN}✓${NC} Made native-bridge.cjs executable"
 
 # Create/update wrapper script with correct node path
 # (Chrome Native Messaging needs bash shebang, not #!/usr/bin/env node)
 cat > "$WRAPPER_SCRIPT" << EOF
 #!/bin/bash
-exec "$NODE_PATH" "$OAUTH_SERVER" "\$@"
+exec "$NODE_PATH" "$NATIVE_BRIDGE" "\$@"
 EOF
 chmod +x "$WRAPPER_SCRIPT"
 echo -e "${GREEN}✓${NC} Created wrapper script with node path"
@@ -81,7 +82,7 @@ echo "Creating manifest file..."
 cat > "$MANIFEST_FILE" << EOF
 {
   "name": "com.llm_in_chrome.oauth_host",
-  "description": "OAuth local server for LLM in Chrome extension",
+  "description": "Native bridge for LLM in Chrome extension (IPC between MCP server and extension)",
   "path": "$WRAPPER_SCRIPT",
   "type": "stdio",
   "allowed_origins": [
@@ -113,7 +114,7 @@ fi
 # Test if the server can run
 echo ""
 echo "Testing OAuth server..."
-if node "$OAUTH_SERVER" <<< '{"type":"ping"}' 2>/dev/null | grep -q "pong"; then
+if node "$NATIVE_BRIDGE" <<< '{"type":"ping"}' 2>/dev/null | grep -q "pong"; then
     echo -e "${GREEN}✓${NC} OAuth server test passed"
 else
     echo -e "${YELLOW}⚠${NC}  OAuth server test inconclusive (may still work)"

@@ -204,3 +204,70 @@ export async function handleResizeWindow(toolInput) {
     return `Error: ${err.message}`;
   }
 }
+
+/**
+ * Handle get_info tool - retrieve information from Mem0 semantic memory
+ *
+ * This tool queries Mem0 for semantically relevant information based on
+ * the context provided when the task was started via browser_start(context=...).
+ *
+ * @param {Object} toolInput - Tool input parameters
+ * @param {string} toolInput.query - Natural language query for information
+ * @param {Object} deps - Dependency injection object
+ * @param {Object} [deps.mcpSession] - MCP session (contains sessionId)
+ * @param {Function} [deps.queryMemory] - Function to query Mem0 via MCP bridge
+ * @param {Function} [deps.log] - Logging function
+ * @returns {Promise<string>} Information found or not found message
+ */
+export async function handleGetInfo(toolInput, deps) {
+  const { query } = toolInput;
+  const { mcpSession, queryMemory, log } = deps;
+
+  if (!query?.trim()) {
+    return 'Error: query cannot be empty. Describe what information you need.';
+  }
+
+  // Get session ID for Mem0 lookup
+  const sessionId = mcpSession?.sessionId;
+
+  if (!sessionId) {
+    // No MCP session - can't query Mem0
+    return `Information not found: This task was not started via MCP, so no context memory is available. You can:
+1. Skip this field if it's optional
+2. Use a reasonable default
+3. Mention in your response that you couldn't fill this field due to missing information`;
+  }
+
+  if (!queryMemory) {
+    // queryMemory function not provided - fallback to raw context if available
+    const context = mcpSession?.context;
+    if (context) {
+      return `Memory system not available. Here is the raw context:\n${context}`;
+    }
+    return `Information not found: Memory system not available and no context provided.`;
+  }
+
+  // Query Mem0 via MCP server
+  if (log) {
+    await log('GET_INFO', `Querying Mem0 for "${query}"`, { sessionId });
+  }
+
+  try {
+    const response = await queryMemory(sessionId, query);
+
+    if (log) {
+      await log('GET_INFO', `Mem0 response for "${query}"`, { response: response?.substring(0, 200) });
+    }
+
+    return response;
+  } catch (error) {
+    if (log) {
+      await log('GET_INFO', `Mem0 error for "${query}"`, { error: error.message });
+    }
+
+    return `Error retrieving information: ${error.message}. You can:
+1. Skip this field if it's optional
+2. Use a reasonable default
+3. Mention in your response that you couldn't fill this field`;
+  }
+}

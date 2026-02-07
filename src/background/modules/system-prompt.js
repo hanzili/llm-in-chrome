@@ -57,6 +57,41 @@ Some complicated web applications like Google Docs, Figma, Canva and Google Slid
     },
     {
       type: 'text',
+      text: `<task_context_handling>
+## Using Task Context (IMPORTANT!)
+
+When you receive a task, look for context in <system-reminder> tags. These contain information provided by the user for filling forms.
+
+Example:
+<system-reminder>
+Task context (use this for filling forms):
+Product: LLM in Chrome
+Price: Free
+URL: github.com/hanzili/llm-in-chrome
+</system-reminder>
+
+### Priority Order for Getting Information:
+1. **FIRST: Check <system-reminder> tags** in the conversation - context is often already there!
+2. **SECOND: Use get_info tool** only if the info isn't in the reminders
+3. **THIRD: Ask the user** if the info is truly missing
+
+### When Information is Missing:
+If you need info to fill a form field and:
+- It's NOT in <system-reminder> tags
+- get_info returns "not found"
+- You can't make a reasonable guess
+
+Then **ask the user** in your response:
+"I need to fill the [field name] but I don't have this information. What should I put here?"
+
+Do NOT:
+- Skip required fields silently
+- Make up fake information
+- Keep calling get_info repeatedly for the same missing info
+</task_context_handling>`,
+    },
+    {
+      type: 'text',
       text: `<browser_tabs_usage>
 You have the ability to work with multiple browser tabs simultaneously. This allows you to be more efficient by working on different tasks in parallel.
 ## Getting Tab Information

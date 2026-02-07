@@ -54,7 +54,12 @@ function send(message) {
   len.writeUInt32LE(buffer.length, 0);
   process.stdout.write(len);
   process.stdout.write(buffer);
-  log(`Sent: ${message.type}`);
+  // Extra debug for mcp_results
+  if (message.type === 'mcp_results') {
+    log(`Sent: ${message.type} with ${message.results?.length || 0} results: ${JSON.stringify(message.results?.map(r => r.type) || [])}`);
+  } else {
+    log(`Sent: ${message.type}`);
+  }
 }
 
 // Read Claude CLI credentials from file or macOS Keychain
@@ -535,14 +540,52 @@ function writeMcpOutbox(result) {
 
 /**
  * Read and clear MCP outbox (for MCP server to read results)
+ * @param {string[]} [requestIds] - Optional array of request IDs to consume.
+ *   If provided, only entries with matching requestId will be returned and removed.
+ *   Entries without matching requestId (or without requestId) are left in the outbox.
+ *   If not provided, all entries are consumed (legacy behavior).
  */
-function readMcpOutbox() {
+function readMcpOutbox(requestIds) {
   try {
     if (!fs.existsSync(MCP_OUTBOX)) return [];
     const outbox = JSON.parse(fs.readFileSync(MCP_OUTBOX, 'utf8'));
-    fs.writeFileSync(MCP_OUTBOX, '[]');
-    log(`MCP outbox: read ${outbox.length} results`);
-    return Array.isArray(outbox) ? outbox : [];
+    if (!Array.isArray(outbox)) return [];
+
+    // If filter is explicitly provided (even empty), use it
+    // Empty array = "I want nothing from outbox, leave everything for others"
+    // Undefined/null = "Consume all (legacy behavior)"
+    if (requestIds === undefined || requestIds === null) {
+      fs.writeFileSync(MCP_OUTBOX, '[]');
+      log(`MCP outbox: read ${outbox.length} results (all - no filter)`);
+      return outbox;
+    }
+
+    // Empty array means "I have no requests, don't consume anything"
+    if (requestIds.length === 0) {
+      log(`MCP outbox: skip (empty filter, ${outbox.length} waiting)`);
+      return [];
+    }
+
+    // Filter: only consume entries matching our requestIds
+    const requestIdSet = new Set(requestIds);
+    const consumed = [];
+    const remaining = [];
+
+    for (const entry of outbox) {
+      if (entry.requestId && requestIdSet.has(entry.requestId)) {
+        consumed.push(entry);
+      } else if (entry.sessionId && requestIdSet.has(entry.sessionId)) {
+        // Also match by sessionId for task updates
+        consumed.push(entry);
+      } else {
+        remaining.push(entry);
+      }
+    }
+
+    // Write back remaining entries
+    fs.writeFileSync(MCP_OUTBOX, JSON.stringify(remaining, null, 2));
+    log(`MCP outbox: read ${consumed.length}/${outbox.length} results (filtered by ${requestIds.length} IDs, ${remaining.length} remaining)`);
+    return consumed;
   } catch (e) {
     log(`MCP outbox read error: ${e.message}`);
     return [];
@@ -569,6 +612,19 @@ function handleMessage(msg) {
       send({ type: 'debug_logged' });
       break;
 
+    case 'agent_log':
+      // Write agent activity to the debug log file (Planning Agent, Explorer Agent, etc.)
+      try {
+        const debugFile = path.join(MCP_DIR, 'mcp-debug.log');
+        const timestamp = msg.timestamp || new Date().toISOString();
+        const source = msg.source || 'Agent';
+        const data = msg.data ? `: ${JSON.stringify(msg.data)}` : '';
+        const entry = `[${timestamp}] [${source}] ${msg.message}${data}\n`;
+        fs.appendFileSync(debugFile, entry);
+      } catch (e) {}
+      // No response needed - fire and forget
+      break;
+
     // ============================================
     // MCP SERVER COMMANDS (from MCP server via stdin)
     // Write to inbox for extension to pick up
@@ -582,6 +638,7 @@ function handleMessage(msg) {
         sessionId: msg.sessionId,
         task: msg.task,
         url: msg.url,
+        context: msg.context,  // Pass task context for memory/info lookup
       });
       send({ type: 'task_queued', sessionId: msg.sessionId });
       break;
@@ -614,10 +671,40 @@ function handleMessage(msg) {
       send({ type: 'screenshot_queued' });
       break;
 
+    case 'mcp_get_info_response':
+      // MCP server sending get_info response back to extension
+      log(`MCP: get_info response for ${msg.sessionId}: ${msg.response?.substring(0, 50)}...`);
+      writeMcpInbox({
+        type: 'get_info_response',
+        sessionId: msg.sessionId,
+        requestId: msg.requestId,
+        response: msg.response,
+      });
+      send({ type: 'get_info_response_queued' });
+      break;
+
     case 'mcp_poll_results':
       // MCP server polling for results from extension
-      const results = readMcpOutbox();
+      // Pass requestIds filter if provided - only consume matching entries
+      const results = readMcpOutbox(msg.requestIds);
       send({ type: 'mcp_results', results });
+      break;
+
+    case 'llm_request':
+      // MCP server requesting LLM completion via extension
+      // Routes: MCP → native host (inbox) → extension → native host (proxy_api_call) → API
+      // This preserves Claude Code authentication (user-agent, headers, etc.)
+      log(`MCP: LLM request ${msg.requestId} (tier: ${msg.modelTier || 'default'}): ${msg.prompt?.substring(0, 50)}...`);
+      writeMcpInbox({
+        type: 'llm_request',
+        requestId: msg.requestId,
+        prompt: msg.prompt,
+        systemPrompt: msg.systemPrompt,
+        jsonMode: msg.jsonMode,
+        maxTokens: msg.maxTokens,
+        modelTier: msg.modelTier,
+      });
+      send({ type: 'llm_request_queued', requestId: msg.requestId });
       break;
 
     // ============================================
@@ -678,6 +765,31 @@ function handleMessage(msg) {
         data: msg.data,
       });
       send({ type: 'screenshot_recorded' });
+      break;
+
+    case 'mcp_get_info':
+      // Extension requesting info from Mem0 (via MCP server)
+      log(`MCP: get_info request for ${msg.sessionId}: ${msg.query}`);
+      writeMcpOutbox({
+        type: 'mcp_get_info',
+        sessionId: msg.sessionId,
+        query: msg.query,
+        requestId: msg.requestId,
+      });
+      send({ type: 'get_info_queued', requestId: msg.requestId });
+      break;
+
+    case 'mcp_llm_response':
+      // Extension sending LLM response back to MCP server
+      log(`MCP: LLM response for ${msg.requestId}: ${msg.content?.substring(0, 50) || msg.error}...`);
+      writeMcpOutbox({
+        type: 'llm_response',
+        requestId: msg.requestId,
+        content: msg.content,
+        error: msg.error,
+        usage: msg.usage,
+      });
+      send({ type: 'llm_response_recorded', requestId: msg.requestId });
       break;
 
     case 'read_cli_credentials':

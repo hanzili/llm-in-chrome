@@ -27,25 +27,32 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { spawn, ChildProcess } from "child_process";
-import * as path from "path";
-import * as os from "os";
-import * as fs from "fs";
+// IPC Module - shared native messaging connection
+import { NativeHostConnection, type NativeMessage } from "./ipc/index.js";
 
-// Session management
-interface BrowserSession {
-  id: string;
-  status: 'starting' | 'running' | 'waiting' | 'complete' | 'error' | 'stopped';
-  task: string;
-  url?: string;
-  startedAt: number;
-  completedAt?: number;
-  currentStep?: string;
+// Memory layer (Mem0)
+import {
+  initializeMemory,
+  storeContext,
+  searchMemory,
+  deleteSessionMemories,
+  isMemoryAvailable,
+  addFacts,
+  getRawContext,
+} from "./memory-lite.js";
+
+// Orchestrator (manages session state machine)
+import { getOrchestrator, Orchestrator } from "./orchestrator/index.js";
+import type { SessionState } from "./types/index.js";
+
+// LLM Client (routes LLM requests through native host)
+import { initializeLLMClient, handleLLMResponse, getPendingRequestIds } from "./llm/client.js";
+
+// Browser-level session tracking (complements orchestrator)
+// This tracks browser-specific details not in the orchestrator
+interface BrowserSessionExtras {
   stepHistory: string[];        // Action steps only
   reasoningHistory: string[];   // Full reasoning/thinking from the agent
-  answer?: string;  // The actual result/answer from the task
-  result?: any;
-  error?: string;
   screenshots: string[];
   pendingMessages: string[];    // Messages waiting to be injected into the agent
 }
@@ -57,40 +64,82 @@ interface PendingScreenshot {
 }
 const pendingScreenshots: Map<string, PendingScreenshot> = new Map();
 
-const sessions: Map<string, BrowserSession> = new Map();
-let sessionCounter = 0;
+// Browser-specific extras (keyed by session ID)
+const browserExtras: Map<string, BrowserSessionExtras> = new Map();
+
+// Orchestrator instance
+let orchestrator: Orchestrator;
 
 // Concurrency limit - too many parallel agents overloads Chrome
 const MAX_CONCURRENT_SESSIONS = parseInt(process.env.LLM_IN_CHROME_MAX_SESSIONS || '5', 10);
 
+// Debug flag for verbose IPC logging (set DEBUG_IPC=1 to enable)
+const DEBUG_IPC = process.env.DEBUG_IPC === '1';
+
 /**
- * Count currently active sessions (running or starting)
+ * Get or create browser extras for a session
  */
-function getActiveSessionCount(): number {
-  let count = 0;
-  for (const session of sessions.values()) {
-    if (session.status === 'running' || session.status === 'starting') {
-      count++;
-    }
+function getBrowserExtras(sessionId: string): BrowserSessionExtras {
+  let extras = browserExtras.get(sessionId);
+  if (!extras) {
+    extras = {
+      stepHistory: [],
+      reasoningHistory: [],
+      screenshots: [],
+      pendingMessages: [],
+    };
+    browserExtras.set(sessionId, extras);
   }
-  return count;
+  return extras;
 }
 
-// Native host connection
-let nativeHost: ChildProcess | null = null;
-let messageBuffer = Buffer.alloc(0);
+/**
+ * Map orchestrator state to legacy status for backward compatibility
+ */
+function mapStateToLegacyStatus(state: SessionState): string {
+  const mapping: Record<SessionState, string> = {
+    CREATED: "starting",
+    PLANNING: "running",
+    NEEDS_INFO: "waiting_for_info",
+    READY: "running",
+    EXECUTING: "running",
+    BLOCKED: "waiting",
+    COMPLETED: "complete",
+    FAILED: "error",
+    CANCELLED: "stopped",
+  };
+  return mapping[state] || "running";
+}
+
+// Native host connection (using shared IPC module)
+let connection: NativeHostConnection;
 
 const TOOLS: Tool[] = [
   {
     name: "browser_start",
-    description: `Start a new browser automation task. The agent will autonomously navigate, click, type, and interact with web pages to complete your task.
+    description: `Start a new browser automation task using a multi-agent system.
 
-Returns a session_id for tracking. Use browser_status to monitor progress.
+ARCHITECTURE (3 agents work together):
+1. PLANNING AGENT - Figures out what to do
+   - Determines which website from the task (e.g., "post on DevHunt" → devhunt.org)
+   - Checks knowledge base for site-specific tips
+   - Identifies what info is needed
 
-Examples:
-- "Fill out the contact form on example.com with my info"
+2. EXPLORER AGENT - Learns unknown sites (triggered automatically)
+   - If no knowledge exists for the domain, does a quick overview first
+   - Creates knowledge file for future tasks
+
+3. BROWSER AGENT - Executes the task
+   - Navigates, clicks, types, fills forms
+   - Uses knowledge from Planning + Explorer
+
+Returns a session_id for tracking. Use browser_status to monitor ALL THREE agents' progress.
+
+Examples (NO URL needed - just describe the task):
+- "Help me publish my tool on DevHunt"
 - "Search for 'MCP protocol' on Google and summarize the first 3 results"
-- "Log into my account and download the latest invoice"
+- "Find jobs on LinkedIn that match my profile"
+- "Log into my bank and download the latest statement"
 
 WHEN TO USE THIS:
 Use this when you need to interact with websites through a real browser - especially for:
@@ -99,22 +148,26 @@ Use this when you need to interact with websites through a real browser - especi
 - Tasks where no CLI tool or other MCP server can help
 
 TASK GUIDELINES:
-- Break down complex multi-step tasks. Instead of "research my profile AND find jobs AND apply", do each as a separate task.
-- But don't over-specify. If you're unsure whether a detail helps, leave it out and let the agent figure it out.
-- For exploration tasks ("find a good job for me"), give the goal and let the agent cook.
-- For precise tasks ("fill this form with X"), be specific about what you need.
+- Just describe what you want done naturally - the Planning Agent figures out where to go
+- Break down complex multi-step tasks into separate tasks
+- For exploration tasks ("find a good job for me"), give the goal and let the agent cook
+- For precise tasks ("fill this form with X"), be specific about what you need
 
-CONCURRENCY LIMIT: Max 5 parallel browser agents (configurable via LLM_IN_CHROME_MAX_SESSIONS env var). Too many agents overloads Chrome.`,
+CONTEXT PARAMETER:
+When the task requires specific information (descriptions, content to fill), pass it in the context parameter.
+Example: context: "Product name: Claude Code. Description: An AI-powered CLI tool. Pricing: Free"
+
+CONCURRENCY: Each task runs in its own browser window for isolation. Max 5 parallel tasks (configurable via LLM_IN_CHROME_MAX_SESSIONS). Windows auto-close when tasks complete.`,
     inputSchema: {
       type: "object",
       properties: {
         task: {
           type: "string",
-          description: "Natural language description of what you want done"
+          description: "Natural language description of what you want done. Include the website name in the task (e.g., 'post on DevHunt', 'search on Google'). The Planning Agent will figure out the URL."
         },
-        url: {
+        context: {
           type: "string",
-          description: "Optional starting URL. If not provided, agent uses current tab or navigates as needed"
+          description: "Optional context with information needed to complete the task (e.g., descriptions, content to fill, preferences). The browser agent can query this when filling forms."
         }
       },
       required: ["task"]
@@ -147,17 +200,27 @@ The agent retains full memory of the session, so you can build on previous work.
   },
   {
     name: "browser_status",
-    description: `Get the status of browser task(s). Returns current state, steps, reasoning, and answer.
+    description: `Get the status of browser task(s). Shows which agent is active and what it's doing.
 
 Call without session_id to get status of all active tasks.
 
 Response includes:
-- steps: Action summary (what the agent did)
-- reasoning: Full agent thinking process
-- current_activity: What's happening now
+- agent_phase: Which agent is active ("planning", "exploring", "executing", "complete")
+- orchestrator_state: Internal state (PLANNING, EXECUTING, COMPLETED, etc.)
+- planning_trace: What the Planning Agent did (tool calls, knowledge lookups)
+- exploring: Whether Explorer Agent is running (learning a new site)
+- steps: Browser Agent action summary
+- reasoning: Browser Agent thinking process
+- current_activity: What's happening right now
 - answer: Final result when complete
 
-IMPORTANT: Poll this frequently (every few seconds) to monitor agent progress in real-time. This allows you to intervene with browser_message if the agent goes off track.`,
+AGENT PHASES:
+1. "planning" - Planning Agent gathering context, checking knowledge base
+2. "exploring" - Explorer Agent learning an unknown site (auto-triggered)
+3. "executing" - Browser Agent performing the task
+4. "complete" - Task finished
+
+IMPORTANT: Poll this frequently (every few seconds) to monitor all agent progress in real-time. This allows you to intervene with browser_message if any agent goes off track.`,
     inputSchema: {
       type: "object",
       properties: {
@@ -217,112 +280,68 @@ Use cases:
   }
 ];
 
-/**
- * Generate unique session ID
- */
-function generateSessionId(): string {
-  sessionCounter++;
-  return `browser-${Date.now()}-${sessionCounter}`;
-}
 
-/**
- * Find native host path from installed manifest
- */
-function findNativeHostPath(): string {
-  const manifestPath = path.join(
-    os.homedir(),
-    'Library', 'Application Support', 'Google', 'Chrome',
-    'NativeMessagingHosts', 'com.llm_in_chrome.oauth_host.json'
-  );
-
-  if (fs.existsSync(manifestPath)) {
-    try {
-      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      if (manifest.path && fs.existsSync(manifest.path)) {
-        return manifest.path;
-      }
-    } catch {}
-  }
-
-  // Development fallback
-  const devPath = path.join(__dirname, '..', '..', 'native-host', 'native-host-wrapper.sh');
-  if (fs.existsSync(devPath)) {
-    return devPath;
-  }
-
-  throw new Error("LLM in Chrome native host not found. Please install the extension first.");
-}
-
-/**
- * Connect to native host
- */
-function connectToNativeHost(): Promise<ChildProcess> {
-  return new Promise((resolve, reject) => {
-    try {
-      const hostPath = findNativeHostPath();
-      console.error(`[MCP] Connecting to: ${hostPath}`);
-
-      const host = spawn(hostPath, [], {
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-
-      host.stdout?.on('data', (chunk: Buffer) => {
-        messageBuffer = Buffer.concat([messageBuffer, chunk]);
-        processNativeMessages();
-      });
-
-      host.stderr?.on('data', (data: Buffer) => {
-        console.error(`[Native] ${data.toString().trim()}`);
-      });
-
-      host.on('error', reject);
-      host.on('close', (code) => {
-        console.error(`[MCP] Native host exited: ${code}`);
-        nativeHost = null;
-      });
-
-      nativeHost = host;
-      setTimeout(() => resolve(host), 100);
-    } catch (err) {
-      reject(err);
-    }
-  });
-}
-
-/**
- * Process messages from native host
- */
-function processNativeMessages(): void {
-  while (messageBuffer.length >= 4) {
-    const msgLen = messageBuffer.readUInt32LE(0);
-    if (messageBuffer.length < 4 + msgLen) break;
-
-    const msgStr = messageBuffer.subarray(4, 4 + msgLen).toString();
-    messageBuffer = messageBuffer.subarray(4 + msgLen);
-
-    try {
-      const message = JSON.parse(msgStr);
-      handleNativeMessage(message);
-    } catch (e) {
-      console.error('[MCP] Parse error:', e);
-    }
-  }
-}
+// NOTE: findNativeHostPath(), connectToNativeHost(), and processNativeMessages()
+// are now handled by the NativeHostConnection class in ./ipc/native-host.ts
 
 /**
  * Handle message from native host
  */
-function handleNativeMessage(message: any): void {
+async function handleNativeMessage(message: any): Promise<void> {
   const { type, sessionId, results, ...data } = message;
 
-  // LOG EVERYTHING for debugging
-  console.error(`[MCP DEBUG] handleNativeMessage called: type=${type}, hasResults=${!!results}, resultsLen=${results?.length || 0}`);
+
+  // Handle get_info requests from extension (uses MemoryLite)
+  if (type === 'mcp_get_info') {
+    const { query, requestId } = data;
+    console.error(`[MCP] get_info request: sessionId=${sessionId}, query="${query}"`);
+
+    let response: string;
+
+    if (!isMemoryAvailable()) {
+      // LLM not ready - fallback to raw context if available
+      const rawContext = getRawContext(sessionId);
+      if (rawContext) {
+        response = `Memory search unavailable. Here is the raw context:\n${rawContext}`;
+      } else {
+        response = `Memory system not ready yet. Please check the <system-reminder> tags in your conversation for task context.`;
+      }
+    } else {
+      // Search memory using LLM-based matching
+      const memories = await searchMemory(sessionId, query, 5);
+
+      if (memories.length === 0) {
+        // No matches - try raw context fallback
+        const rawContext = getRawContext(sessionId);
+        if (rawContext) {
+          response = `No specific match for "${query}". Here is the full context:\n${rawContext}`;
+        } else {
+          response = `No information found for "${query}". Check <system-reminder> tags or ask the user.`;
+        }
+      } else {
+        // Return relevant facts
+        const formattedMemories = memories
+          .map((m, i) => `${i + 1}. ${m.memory} (relevance: ${(m.score * 100).toFixed(0)}%)`)
+          .join('\n');
+        response = `Found relevant information:\n${formattedMemories}`;
+      }
+    }
+
+    // Send response back to extension
+    await sendToNative({
+      type: 'mcp_get_info_response',
+      sessionId,
+      requestId,
+      response,
+    });
+    return;
+  }
 
   // Handle batch results from polling
   if (type === 'mcp_results' && Array.isArray(results)) {
-    console.error(`[MCP DEBUG] Processing ${results.length} results from poll`);
+    if (DEBUG_IPC) console.error(`[MCP] Processing ${results.length} results from poll`);
     for (const result of results) {
-      console.error(`[MCP DEBUG] Result: ${JSON.stringify(result).substring(0, 200)}`);
+      if (DEBUG_IPC) console.error(`[MCP] Result: ${JSON.stringify(result).substring(0, 200)}`);
       processResult(result);
     }
     return;
@@ -338,14 +357,15 @@ function handleNativeMessage(message: any): void {
     if (hint) console.error(`[MCP] Hint: ${hint}`);
     if (action) console.error(`[MCP] Action: ${action}`);
 
-    // If OAuth failed, mark all running sessions as errored
+    // If OAuth failed, mark all active sessions as errored
     if (errorType === 'oauth_refresh_failed') {
-      for (const [id, session] of sessions.entries()) {
-        if (session.status === 'running' || session.status === 'starting') {
-          session.status = 'error';
-          session.error = `Authentication expired: ${data.error}. ${action}`;
-          session.completedAt = Date.now();
-          console.error(`[MCP] Session ${id} marked as error due to OAuth failure`);
+      const allStatuses = orchestrator.getAllStatuses();
+      for (const status of allStatuses) {
+        if (status.status === 'EXECUTING' || status.status === 'PLANNING' || status.status === 'READY') {
+          orchestrator.updateFromBrowserEvent(status.sessionId, 'error', {
+            error: `Authentication expired: ${data.error}. ${action}`,
+          });
+          console.error(`[MCP] Session ${status.sessionId} marked as error due to OAuth failure`);
         }
       }
     }
@@ -358,7 +378,7 @@ function handleNativeMessage(message: any): void {
   }
 
   // Handle single result
-  if (sessionId && sessions.has(sessionId)) {
+  if (sessionId && orchestrator.hasSession(sessionId)) {
     processResult({ type, sessionId, ...data });
   }
 }
@@ -369,7 +389,19 @@ function handleNativeMessage(message: any): void {
 function processResult(result: any): void {
   const { type, sessionId, ...data } = result;
 
-  console.error(`[MCP] processResult: type=${type}, sessionId=${sessionId}, activeSessions=${Array.from(sessions.keys()).join(',')}`);
+  if (DEBUG_IPC) console.error(`[MCP] processResult: type=${type}, sessionId=${sessionId}`);
+
+  // Handle LLM responses (not tied to browser sessions)
+  if (type === 'llm_response') {
+    const requestId = data.requestId || sessionId;
+    console.error(`[MCP] LLM response received for request: ${requestId}`);
+    handleLLMResponse(requestId, {
+      content: data.content,
+      error: data.error,
+      usage: data.usage,
+    });
+    return;
+  }
 
   // Handle screenshots that might be for pending requests (not real sessions)
   if (type === 'screenshot' && data.data && sessionId) {
@@ -383,56 +415,57 @@ function processResult(result: any): void {
     }
   }
 
-  if (!sessionId || !sessions.has(sessionId)) {
-    // Log why we're skipping
-    console.error(`[MCP] Skipping result: sessionId=${sessionId}, exists=${sessions.has(sessionId)}`);
+  if (!sessionId || !orchestrator.hasSession(sessionId)) {
+    console.error(`[MCP] Skipping result: sessionId=${sessionId}, exists=${orchestrator.hasSession(sessionId)}`);
     return;
   }
 
-  const session = sessions.get(sessionId)!;
+  const extras = getBrowserExtras(sessionId);
+  const currentStep = data.step || data.status || data.message;
 
   switch (type) {
     case 'task_update':
-      session.status = 'running';
-      session.currentStep = data.step || data.status;
-      if (session.currentStep) {
-        // Always add to reasoning history (full trace)
-        session.reasoningHistory.push(session.currentStep);
-        // Only add non-thinking steps to stepHistory (action summary)
-        if (session.currentStep !== 'thinking' && !session.currentStep.startsWith('[thinking]')) {
-          session.stepHistory.push(session.currentStep);
+      if (currentStep) {
+        // Update orchestrator with progress
+        orchestrator.updateFromBrowserEvent(sessionId, "progress", { step: currentStep });
+
+        // Track in browser extras
+        extras.reasoningHistory.push(currentStep);
+        if (currentStep !== 'thinking' && !currentStep.startsWith('[thinking]')) {
+          extras.stepHistory.push(currentStep);
         }
         // Clear pending messages when we see confirmation they were injected
-        if (session.currentStep.startsWith('[User follow-up]:') && session.pendingMessages.length > 0) {
-          session.pendingMessages.shift(); // Remove the oldest pending message
+        if (currentStep.startsWith('[User follow-up]:') && extras.pendingMessages.length > 0) {
+          extras.pendingMessages.shift();
         }
       }
       break;
+
     case 'task_waiting':
-      session.status = 'waiting';
-      session.currentStep = data.message;
-      if (session.currentStep) {
-        session.reasoningHistory.push(`[WAITING] ${session.currentStep}`);
-        session.stepHistory.push(`[WAITING] ${session.currentStep}`);
+      if (currentStep) {
+        orchestrator.updateFromBrowserEvent(sessionId, "blocked", {
+          questions: [currentStep],
+        });
+        extras.reasoningHistory.push(`[WAITING] ${currentStep}`);
+        extras.stepHistory.push(`[WAITING] ${currentStep}`);
       }
       break;
+
     case 'task_complete':
-      session.status = 'complete';
-      session.completedAt = Date.now();
-      session.result = data.result;
-      // Extract answer from currentStep (where extension puts the final answer)
-      session.answer = session.currentStep;
+      // Get the last step as the answer
+      const session = orchestrator.getSession(sessionId);
+      const answer = session?.currentStep || currentStep;
+      orchestrator.updateFromBrowserEvent(sessionId, "complete", { answer });
       console.error(`[MCP] Session ${sessionId} marked COMPLETE`);
       break;
+
     case 'task_error':
-      session.status = 'error';
-      session.completedAt = Date.now();
-      session.error = data.error;
+      orchestrator.updateFromBrowserEvent(sessionId, "error", { error: data.error });
       break;
+
     case 'screenshot':
       if (data.data) {
-        session.screenshots.push(data.data);
-        // Check if there's a pending screenshot request for this session
+        extras.screenshots.push(data.data);
         const pending = pendingScreenshots.get(sessionId);
         if (pending) {
           clearTimeout(pending.timeout);
@@ -446,74 +479,126 @@ function processResult(result: any): void {
 
 /**
  * Send message to native host
+ * (Wrapper for NativeHostConnection.send() with logging)
  */
-async function sendToNative(message: any): Promise<void> {
-  if (!nativeHost?.stdin || !nativeHost.stdin.writable) {
-    console.error(`[MCP] Reconnecting to native host (stdin=${!!nativeHost?.stdin}, writable=${nativeHost?.stdin?.writable})`);
-    nativeHost = null;
-    await connectToNativeHost();
-  }
+async function sendToNative(message: NativeMessage): Promise<void> {
+  console.error(`[MCP] Sending: ${message.type}`);
+  await connection.send(message);
+}
 
-  const json = JSON.stringify(message);
-  const buffer = Buffer.from(json);
-  const len = Buffer.alloc(4);
-  len.writeUInt32LE(buffer.length, 0);
-
-  console.error(`[MCP] Sending: ${message.type} (${json.length} bytes)`);
-
-  try {
-    nativeHost!.stdin!.write(len);
-    nativeHost!.stdin!.write(buffer);
-  } catch (err) {
-    console.error(`[MCP] Write error:`, err);
-    nativeHost = null;
-    throw err;
-  }
+/**
+ * Map orchestrator state to active agent for clarity
+ */
+function mapStateToAgentPhase(state: SessionState, session: any): string {
+  if (state === 'PLANNING') return 'planning_agent';
+  if (state === 'EXECUTING' && session?.collectedInfo?._exploring === 'true') return 'explorer_agent';
+  if (state === 'EXECUTING') return 'browser_agent';
+  if (state === 'COMPLETED') return 'complete';
+  if (state === 'FAILED') return 'failed';
+  if (state === 'NEEDS_INFO') return 'needs_info';
+  if (state === 'BLOCKED') return 'blocked';
+  return 'browser_agent';
 }
 
 /**
  * Format session for response
  *
- * Keep it simple - the client needs:
- * - Current activity (what's happening now)
- * - Full step history (to detect wrong paths or loops)
- * - Full reasoning history (agent's thinking process)
- * - Answer when complete
+ * Combines orchestrator session status with browser-specific extras.
+ * Shows which agent is active and what each has done.
  */
-function formatSession(session: BrowserSession): any {
+function formatSession(sessionId: string): any {
+  const status = orchestrator.getStatus(sessionId);
+  if (!status) return null;
+
+  const session = orchestrator.getSession(sessionId);
+  const extras = browserExtras.get(sessionId);
+  const legacyStatus = mapStateToLegacyStatus(status.status);
+
   const response: any = {
-    session_id: session.id,
-    status: session.status,
+    session_id: sessionId,
+    status: legacyStatus,
+    // NEW: Show which agent phase we're in
+    agent_phase: mapStateToAgentPhase(status.status, session),
+    orchestrator_state: status.status,
   };
 
+  // NEW: Agent traces grouped by agent (limited to last 10 each for brevity)
+  const TRACE_LIMIT = 10;
+  if (session?.executionTrace && session.executionTrace.length > 0) {
+    // Planning Agent trace (limited)
+    const planningSteps = session.executionTrace
+      .filter((t: any) => t.type?.startsWith('planning_agent:'))
+      .map((t: any) => ({ type: t.type, description: t.description, timestamp: t.timestamp }))
+      .slice(-TRACE_LIMIT);
+    if (planningSteps.length > 0) {
+      response.planning_agent_trace = planningSteps;
+    }
+
+    // Explorer Agent trace (limited)
+    const explorerSteps = session.executionTrace
+      .filter((t: any) => t.type?.startsWith('explorer_agent:'))
+      .map((t: any) => ({ type: t.type, description: t.description, timestamp: t.timestamp }))
+      .slice(-TRACE_LIMIT);
+    if (explorerSteps.length > 0) {
+      response.explorer_agent_trace = explorerSteps;
+    }
+
+    // Browser Agent trace (limited) - just count, not full list
+    const browserSteps = session.executionTrace
+      .filter((t: any) => t.type?.startsWith('browser_agent:') || !t.type?.includes('_agent:'));
+    if (browserSteps.length > 0) {
+      response.browser_agent_actions = browserSteps.length;
+      // Only show last few for context
+      response.recent_browser_actions = browserSteps.slice(-5).map((t: any) => t.description);
+    }
+  }
+
+  // NEW: Show if exploring
+  if (session?.collectedInfo?._exploring === 'true') {
+    response.exploring = true;
+    response.original_task = session.collectedInfo._originalTask;
+  }
+
+  // NEW: Show domain and site knowledge status
+  if (session?.domain) {
+    response.domain = session.domain;
+    response.has_site_knowledge = !!session.siteKnowledge;
+  }
+
   // What's happening right now
-  if (session.status === 'running' || session.status === 'waiting') {
-    response.current_activity = session.currentStep;
+  if (legacyStatus === 'running' || legacyStatus === 'waiting' || legacyStatus === 'waiting_for_info') {
+    response.current_activity = status.currentStep;
   }
 
-  // Full step history - action summary (no thinking markers)
-  if (session.stepHistory.length > 0) {
-    response.steps = session.stepHistory;
+  // Step/reasoning counts + recent samples (not full history - too large)
+  if (extras && extras.stepHistory.length > 0) {
+    response.total_steps = extras.stepHistory.length;
+    response.recent_steps = extras.stepHistory.slice(-5);
   }
 
-  // Full reasoning history - includes all thinking and actions
-  if (session.reasoningHistory.length > 0) {
-    response.reasoning = session.reasoningHistory;
+  // Don't include full reasoning history - it's too verbose
+  if (extras && extras.reasoningHistory.length > 0) {
+    response.reasoning_count = extras.reasoningHistory.length;
   }
 
   // Show pending messages if any
-  if (session.pendingMessages.length > 0) {
-    response.pending_messages = session.pendingMessages.length;
+  if (extras && extras.pendingMessages.length > 0) {
+    response.pending_messages = extras.pendingMessages.length;
+  }
+
+  // Questions if waiting for info
+  if (status.questions && status.questions.length > 0) {
+    response.questions = status.questions;
   }
 
   // Final answer when complete
-  if (session.status === 'complete') {
-    response.answer = session.answer || session.currentStep;
+  if (legacyStatus === 'complete') {
+    response.answer = status.answer || status.currentStep;
   }
 
   // Error details
-  if (session.status === 'error') {
-    response.error = session.error;
+  if (legacyStatus === 'error') {
+    response.error = status.error;
   }
 
   return response;
@@ -546,6 +631,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "browser_start": {
         const task = args?.task as string;
         const url = args?.url as string | undefined;
+        const context = args?.context as string | undefined;
 
         if (!task?.trim()) {
           return {
@@ -555,7 +641,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Check concurrency limit
-        const activeCount = getActiveSessionCount();
+        const activeCount = orchestrator.getActiveSessionCount();
         if (activeCount >= MAX_CONCURRENT_SESSIONS) {
           return {
             content: [{
@@ -572,36 +658,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const sessionId = generateSessionId();
-        const session: BrowserSession = {
-          id: sessionId,
-          status: 'starting',
-          task,
-          url,
-          startedAt: Date.now(),
-          stepHistory: [],
-          reasoningHistory: [],
-          screenshots: [],
-          pendingMessages: []
-        };
-        sessions.set(sessionId, session);
+        // Store context in Mem0 for semantic retrieval (before starting task)
+        // We'll get the session ID first, then store
+        const result = await orchestrator.startTask({ task, url, context });
 
-        // Send to extension via native host
-        await sendToNative({
-          type: 'mcp_start_task',
-          sessionId,
-          task,
-          url
-        });
+        // Store context in Mem0 for semantic retrieval
+        if (context && isMemoryAvailable()) {
+          await storeContext(result.sessionId, context);
+        }
 
-        session.status = 'running';
+        // Initialize browser extras for this session
+        getBrowserExtras(result.sessionId);
+
+        // Get the session for agent traces
+        const session = orchestrator.getSession(result.sessionId);
+
+        // Extract planning agent trace
+        const planningAgentTrace = session?.executionTrace
+          ?.filter((t: any) => t.type?.startsWith('planning_agent:'))
+          .map((t: any) => ({ type: t.type, description: t.description })) || [];
+
+        // Extract explorer agent trace
+        const explorerAgentTrace = session?.executionTrace
+          ?.filter((t: any) => t.type?.startsWith('explorer_agent:'))
+          .map((t: any) => ({ type: t.type, description: t.description })) || [];
 
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
-              session_id: sessionId,
-              status: "running"
+              session_id: result.sessionId,
+              status: mapStateToLegacyStatus(result.status),
+              agent_phase: result.exploring ? 'explorer_agent' : 'browser_agent',
+              domain: result.domain,
+              has_context: !!context,
+              has_site_knowledge: !!session?.siteKnowledge,
+              exploring: result.exploring || false,
+              planning_agent_trace: planningAgentTrace.length > 0 ? planningAgentTrace : undefined,
+              explorer_agent_trace: explorerAgentTrace.length > 0 ? explorerAgentTrace : undefined,
             }, null, 2)
           }]
         };
@@ -611,7 +705,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const sessionId = args?.session_id as string;
         const message = args?.message as string;
 
-        if (!sessionId || !sessions.has(sessionId)) {
+        if (!sessionId || !orchestrator.hasSession(sessionId)) {
           return {
             content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
             isError: true
@@ -625,22 +719,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
 
-        const session = sessions.get(sessionId)!;
+        const extras = getBrowserExtras(sessionId);
 
         // Track this message as pending (for visibility in status)
-        session.pendingMessages.push(message);
+        extras.pendingMessages.push(message);
 
+        // Send to orchestrator (handles state transitions)
+        await orchestrator.sendMessage(sessionId, message);
+
+        // Also send to native host for browser agent
         await sendToNative({
           type: 'mcp_send_message',
           sessionId,
           message
         });
-
-        // If session was running, it stays running
-        // If session was complete/stopped, it will be re-activated by the extension
-        if (session.status !== 'running') {
-          session.status = 'running';
-        }
 
         return {
           content: [{
@@ -649,7 +741,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               session_id: sessionId,
               status: "message_sent",
               message: "Follow-up message sent to the agent",
-              pending_messages: session.pendingMessages.length
+              pending_messages: extras.pendingMessages.length
             }, null, 2)
           }]
         };
@@ -659,7 +751,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const sessionId = args?.session_id as string | undefined;
 
         if (sessionId) {
-          if (!sessions.has(sessionId)) {
+          if (!orchestrator.hasSession(sessionId)) {
             return {
               content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
               isError: true
@@ -669,15 +761,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return {
             content: [{
               type: "text",
-              text: JSON.stringify(formatSession(sessions.get(sessionId)!), null, 2)
+              text: JSON.stringify(formatSession(sessionId), null, 2)
             }]
           };
         }
 
         // Return all active sessions
-        const activeSessions = Array.from(sessions.values())
-          .filter(s => s.status !== 'complete' && s.status !== 'error' && s.status !== 'stopped')
-          .map(s => formatSession(s));
+        const allStatuses = orchestrator.getAllStatuses();
+        const activeSessions = allStatuses
+          .filter(s => !["COMPLETED", "FAILED", "CANCELLED"].includes(s.status))
+          .map(s => formatSession(s.sessionId))
+          .filter(s => s !== null);
 
         return {
           content: [{
@@ -691,7 +785,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const sessionId = args?.session_id as string;
         const shouldRemove = args?.remove === true;
 
-        if (!sessionId || !sessions.has(sessionId)) {
+        if (!sessionId || !orchestrator.hasSession(sessionId)) {
           return {
             content: [{ type: "text", text: `Error: Session not found: ${sessionId}` }],
             isError: true
@@ -704,12 +798,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           remove: shouldRemove  // Tell extension whether to delete or just pause
         });
 
-        const session = sessions.get(sessionId)!;
-        const partialResult = session.result || session.currentStep;
+        const session = orchestrator.getSession(sessionId);
+        const partialResult = session?.answer || session?.currentStep;
 
         if (shouldRemove) {
           // Delete the session completely
-          sessions.delete(sessionId);
+          orchestrator.delete(sessionId);
+          browserExtras.delete(sessionId);
+
+          // Clean up Mem0 memories for this session
+          if (isMemoryAvailable()) {
+            deleteSessionMemories(sessionId).catch(err =>
+              console.error(`[MCP] Failed to clean up memories for ${sessionId}:`, err)
+            );
+          }
+
           return {
             content: [{
               type: "text",
@@ -723,7 +826,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         } else {
           // Just pause - can resume later
-          session.status = 'stopped';
+          orchestrator.cancel(sessionId);
           return {
             content: [{
               type: "text",
@@ -776,10 +879,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Fallback: check session screenshots if we have a session
-        if (sessionId && sessions.has(sessionId)) {
-          const session = sessions.get(sessionId)!;
-          if (session.screenshots.length > 0) {
-            const latest = session.screenshots[session.screenshots.length - 1];
+        if (sessionId && orchestrator.hasSession(sessionId)) {
+          const extras = browserExtras.get(sessionId);
+          if (extras && extras.screenshots.length > 0) {
+            const latest = extras.screenshots[extras.screenshots.length - 1];
             return {
               content: [
                 {
@@ -804,29 +907,34 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "browser_debug": {
         // Debug tool to dump internal state
-        const allSessions = Array.from(sessions.entries()).map(([id, s]) => ({
-          id,
-          status: s.status,
-          task: s.task?.substring(0, 50),
-          stepHistoryLength: s.stepHistory.length,
-          reasoningHistoryLength: s.reasoningHistory?.length || 0,
-          stepHistory: s.stepHistory.slice(-10), // Last 10 steps
-          reasoningHistory: s.reasoningHistory?.slice(-10), // Last 10 reasoning entries
-          pendingMessages: s.pendingMessages?.length || 0,
-          currentStep: s.currentStep,
-          answer: s.answer,
-          error: s.error,
-          startedAt: s.startedAt,
-          completedAt: s.completedAt,
-        }));
+        const allStatuses = orchestrator.getAllStatuses();
+        const debugSessions = allStatuses.map(status => {
+          const extras = browserExtras.get(status.sessionId);
+          return {
+            id: status.sessionId,
+            orchestratorState: status.status,
+            legacyStatus: mapStateToLegacyStatus(status.status),
+            task: status.task?.substring(0, 50),
+            domain: status.domain,
+            stepHistoryLength: extras?.stepHistory.length || 0,
+            reasoningHistoryLength: extras?.reasoningHistory.length || 0,
+            stepHistory: extras?.stepHistory.slice(-10) || [],
+            reasoningHistory: extras?.reasoningHistory.slice(-10) || [],
+            pendingMessages: extras?.pendingMessages.length || 0,
+            currentStep: status.currentStep,
+            answer: status.answer,
+            error: status.error,
+          };
+        });
 
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
-              totalSessions: sessions.size,
-              nativeHostConnected: !!nativeHost?.stdin,
-              sessions: allSessions
+              totalSessions: allStatuses.length,
+              activeSessions: orchestrator.getActiveSessionCount(),
+              nativeHostConnected: connection?.isConnected() ?? false,
+              sessions: debugSessions
             }, null, 2)
           }]
         };
@@ -848,12 +956,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 /**
  * Poll for results from extension via native host
+ * Uses filtered polling to prevent race conditions with CLI
  */
 async function pollForResults(): Promise<void> {
-  if (!nativeHost?.stdin) return;
+  if (!connection?.isConnected()) return;
 
   try {
-    sendToNative({ type: 'mcp_poll_results' });
+    // Collect all IDs we're interested in: pending LLM requests + active sessions
+    const pendingLLMIds = getPendingRequestIds();
+    const sessionIds = orchestrator.getActiveSessionIds();
+    const requestIds = [...pendingLLMIds, ...sessionIds];
+
+    // Pass request IDs filter to prevent race condition with CLI
+    await connection.send({ type: 'mcp_poll_results', requestIds });
   } catch (err) {
     console.error('[MCP] Poll error:', err);
   }
@@ -863,10 +978,53 @@ async function pollForResults(): Promise<void> {
 async function main() {
   console.error("[MCP] LLM in Chrome MCP Server starting...");
 
+  // Initialize orchestrator
+  orchestrator = getOrchestrator();
+
+  // Set up browser execute callback - this bridges orchestrator to native host
+  orchestrator.setBrowserExecuteCallback(async (sessionId, task, url, context, siteKnowledge) => {
+    // Combine context with site knowledge for the browser agent
+    let fullContext = context || "";
+    if (siteKnowledge) {
+      fullContext = `${fullContext}\n\n--- Site Knowledge ---\n${siteKnowledge}`;
+    }
+
+    await sendToNative({
+      type: 'mcp_start_task',
+      sessionId,
+      task,
+      url,
+      context: fullContext.trim() || undefined
+    });
+  });
+
+  console.error("[MCP] Orchestrator initialized");
+
   try {
-    // Pre-connect to native host
-    await connectToNativeHost();
+    // Initialize native host connection using shared IPC module
+    connection = new NativeHostConnection({
+      onStderr: (text) => console.error(`[Native] ${text}`),
+      onDisconnect: (code) => console.error(`[MCP] Native host exited: ${code}`),
+    });
+    connection.onMessage(handleNativeMessage);
+    await connection.connect();
     console.error("[MCP] Connected to native host");
+
+    // Initialize LLM client (routes requests through native host)
+    initializeLLMClient(sendToNative);
+    console.error("[MCP] LLM client initialized");
+
+    // Initialize MemoryLite (needs LLM client to be ready)
+    try {
+      await initializeMemory();
+      if (isMemoryAvailable()) {
+        console.error("[MCP] MemoryLite ready (uses existing LLM infrastructure)");
+      } else {
+        console.error("[MCP] MemoryLite waiting for LLM client");
+      }
+    } catch (err) {
+      console.error("[MCP] Memory layer initialization failed:", err);
+    }
 
     // Start polling for results every 500ms
     setInterval(pollForResults, 500);

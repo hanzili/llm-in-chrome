@@ -794,6 +794,18 @@ body {
   color: var(--accent);
 }
 
+.install-cmd {
+  display: block;
+  font-family: 'SF Mono', Monaco, monospace;
+  font-size: 12px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  user-select: all;
+}
+
 .connected-status {
   display: flex;
   align-items: center;

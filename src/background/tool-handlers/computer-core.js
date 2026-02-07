@@ -9,6 +9,7 @@
 
 import { cdpHelper } from '../modules/cdp-helper.js';
 import { screenshotContextManager, scaleCoordinates } from '../modules/screenshot-context.js';
+import { ensureDebugger } from '../managers/debugger-manager.js';
 import { isAntiBotEnabled } from '../modules/domain-skills.js';
 
 // ============================================================================
@@ -341,6 +342,9 @@ export async function handleComputer(input) {
     if (!tab.id) {
       throw new Error("Active tab has no ID");
     }
+
+    // Ensure debugger is attached BEFORE any action (prevents "not attached" errors)
+    await ensureDebugger(tabId);
 
     const originalUrl = tab.url;
     // Check if anti-bot simulation is needed for this domain
