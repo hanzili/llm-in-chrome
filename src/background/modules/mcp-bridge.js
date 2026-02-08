@@ -1,23 +1,27 @@
 /**
  * MCP Bridge Module
  *
- * Enables communication between MCP server and the Chrome extension
- * via native host file-based IPC.
+ * Enables communication between MCP server and the Chrome extension.
+ * Primary: WebSocket relay (ws://localhost:7862) for real-time messaging.
+ * Fallback: Native host file-based IPC polling when WebSocket is unavailable.
  *
- * Flow:
- * 1. MCP server writes commands to inbox via native host
- * 2. Extension polls inbox and executes commands
- * 3. Extension writes results to outbox via native host
- * 4. MCP server polls outbox for results
+ * The service worker can sleep at any time, dropping the WebSocket.
+ * On wake, connectToRelay() reconnects. During disconnection, native
+ * messaging polling keeps things working.
  */
 
-import { callLLMSimpleViaCodex, loadConfig } from './api.js';
 
 const NATIVE_HOST_NAME = 'com.llm_in_chrome.oauth_host';
 const POLL_INTERVAL_MS = 500;
+const WS_RELAY_URL = 'ws://localhost:7862';
+const WS_RECONNECT_DELAY_MS = 5000;
 
 let pollInterval = null;
 let isPolling = false;
+
+// WebSocket connection to relay server
+let relaySocket = null;
+let wsReconnectTimer = null;
 
 // Active MCP sessions
 const mcpSessions = new Map();
@@ -34,7 +38,8 @@ let onStopTask = null;
 let onScreenshot = null;
 
 /**
- * Initialize MCP bridge with callbacks
+ * Initialize MCP bridge with callbacks.
+ * Tries WebSocket relay first, falls back to native host polling.
  */
 export function initMcpBridge(callbacks) {
   onStartTask = callbacks.onStartTask;
@@ -43,6 +48,149 @@ export function initMcpBridge(callbacks) {
   onScreenshot = callbacks.onScreenshot;
 
   console.log('[MCP Bridge] Initialized');
+
+  // Try WebSocket relay first
+  connectToRelay();
+
+  // Keepalive alarm — wakes the service worker periodically to reconnect
+  // relay WebSocket (which drops when the service worker sleeps).
+  // The relay queues messages while we're offline, so reconnecting
+  // delivers any pending start_task/send_message commands.
+  try {
+    chrome.alarms.create('ws-keepalive', { periodInMinutes: 0.5 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === 'ws-keepalive') {
+        connectToRelay();
+      }
+    });
+  } catch (e) {
+    console.warn('[MCP Bridge] Alarms API unavailable:', e.message);
+  }
+}
+
+/**
+ * Connect to the WebSocket relay server.
+ * On success, stops native polling (WebSocket is faster and push-based).
+ * On failure/disconnect, starts native polling as fallback and schedules reconnect.
+ */
+export function connectToRelay() {
+  // Clear any pending reconnect
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+
+  // Don't reconnect if already connected
+  if (relaySocket && relaySocket.readyState === WebSocket.OPEN) {
+    return;
+  }
+
+  try {
+    console.log('[MCP Bridge] Connecting to WebSocket relay:', WS_RELAY_URL);
+    relaySocket = new WebSocket(WS_RELAY_URL);
+
+    relaySocket.onopen = () => {
+      console.log('[MCP Bridge] WebSocket connected');
+
+      // Register as the extension client
+      relaySocket.send(JSON.stringify({ type: 'register', role: 'extension' }));
+
+      // WebSocket is faster — stop polling to reduce overhead
+      stopMcpPolling();
+    };
+
+    relaySocket.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+
+        // Skip registration acknowledgements
+        if (message.type === 'registered' || message.type === 'error') {
+          if (message.type === 'error') {
+            console.warn('[MCP Bridge] Relay error:', message.error);
+          }
+          return;
+        }
+
+        // Route through the same command handler as polling
+        // Messages from MCP/CLI come in the same format as inbox commands
+        // but with mcp_ prefix (e.g., mcp_start_task → start_task)
+        const command = normalizeIncomingMessage(message);
+        if (command) {
+          handleMcpCommand(command);
+        }
+      } catch (e) {
+        console.error('[MCP Bridge] WebSocket message parse error:', e);
+      }
+    };
+
+    relaySocket.onclose = () => {
+      console.log('[MCP Bridge] WebSocket disconnected');
+      relaySocket = null;
+
+      // Fall back to native polling
+      startMcpPolling();
+
+      // Schedule reconnect
+      wsReconnectTimer = setTimeout(() => {
+        connectToRelay();
+      }, WS_RECONNECT_DELAY_MS);
+    };
+
+    relaySocket.onerror = (err) => {
+      console.log('[MCP Bridge] WebSocket error (relay may not be running)');
+      // onclose will fire after this, handling fallback
+    };
+  } catch (e) {
+    console.log('[MCP Bridge] WebSocket connection failed:', e.message);
+    // Ensure polling is running as fallback
+    startMcpPolling();
+
+    // Schedule reconnect
+    wsReconnectTimer = setTimeout(() => {
+      connectToRelay();
+    }, WS_RECONNECT_DELAY_MS);
+  }
+}
+
+/**
+ * Normalize incoming WebSocket messages to the command format
+ * expected by handleMcpCommand().
+ *
+ * Messages from MCP/CLI arrive with mcp_ prefix (e.g., mcp_start_task).
+ * The handleMcpCommand() expects unprefixed types (e.g., start_task).
+ */
+function normalizeIncomingMessage(message) {
+  const { type, ...rest } = message;
+
+  // Map from MCP server message types to bridge command types
+  const typeMap = {
+    'mcp_start_task': 'start_task',
+    'mcp_send_message': 'send_message',
+    'mcp_stop_task': 'stop_task',
+    'mcp_screenshot': 'screenshot',
+    'mcp_get_info_response': 'get_info_response',
+    'mcp_poll_results': null, // Not applicable over WebSocket (push-based)
+    'llm_request': 'llm_request',
+  };
+
+  const mappedType = typeMap[type];
+  if (mappedType === undefined) {
+    // Unknown type — try passing through as-is
+    return { type, ...rest };
+  }
+  if (mappedType === null) {
+    // Type should be skipped
+    return null;
+  }
+
+  return { type: mappedType, ...rest };
+}
+
+/**
+ * Check if WebSocket relay is connected
+ */
+export function isRelayConnected() {
+  return relaySocket && relaySocket.readyState === WebSocket.OPEN;
 }
 
 /**
@@ -285,33 +433,50 @@ export function queryMemory(sessionId, query, timeoutMs = 10000) {
   });
 }
 
+// Model tier → Anthropic model ID mapping for ccproxy
+const CCPROXY_MODEL_MAP = {
+  fast: 'claude-haiku-4-5-20251001',
+  smart: 'claude-sonnet-4-5-20250929',
+  powerful: 'claude-opus-4-5-20251101',
+};
+
+const CCPROXY_URL = 'http://127.0.0.1:8000/claude/v1/messages';
+
 /**
  * Handle LLM request from MCP server
- * Uses Codex (ChatGPT Pro/Plus) via native host proxy
- * Reads credentials from ~/.codex/auth.json
- * (Planning Agent, Explorer Agent don't need browser tools)
+ * Routes directly to ccproxy (local Claude Code proxy) via fetch().
+ * No native host needed — ccproxy handles credential injection.
  */
 async function handleLLMRequest(command) {
   const { requestId, prompt, systemPrompt, maxTokens, modelTier } = command;
+  const model = CCPROXY_MODEL_MAP[modelTier] || CCPROXY_MODEL_MAP.smart;
 
   try {
-    // Ensure config is loaded
-    await loadConfig();
+    debugLog('llm_request via ccproxy', { requestId, model, modelTier: modelTier || 'smart' });
 
-    // Build messages array - just the user prompt
-    // System prompt goes to Codex "instructions" field
-    const messages = [{ role: 'user', content: prompt }];
+    const body = {
+      model,
+      max_tokens: maxTokens || 2000,
+      messages: [{ role: 'user', content: prompt }],
+      ...(systemPrompt ? { system: systemPrompt } : {}),
+    };
 
-    // Use Codex (ChatGPT Pro/Plus) for LLM calls
-    // modelTier: 'fast' → gpt-5.1-mini, 'smart' → gpt-5.1-codex, 'powerful' → gpt-5.1-codex-max
-    debugLog('llm_request calling Codex', { requestId, messageCount: messages.length, modelTier: modelTier || 'smart' });
+    const response = await fetch(CCPROXY_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
 
-    const result = await callLLMSimpleViaCodex(messages, maxTokens || 2000, modelTier || 'smart', systemPrompt);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`ccproxy ${response.status}: ${errorText.substring(0, 200)}`);
+    }
 
-    // Extract text content from response
+    const result = await response.json();
+
+    // Extract text content from Anthropic Messages API response
     const content = result.content?.find(b => b.type === 'text')?.text || '';
 
-    // Send response back to MCP server
     sendToNativeHost({
       type: 'mcp_llm_response',
       requestId,
@@ -319,15 +484,14 @@ async function handleLLMRequest(command) {
       usage: result.usage,
     });
 
-    debugLog('llm_request completed (Codex)', { requestId, contentLength: content.length, modelTier: modelTier || 'smart' });
+    debugLog('llm_request completed', { requestId, contentLength: content.length });
   } catch (error) {
-    console.error('[MCP Bridge] Codex LLM request failed:', error);
+    console.error('[MCP Bridge] LLM request failed:', error);
 
-    // Send error response
     sendToNativeHost({
       type: 'mcp_llm_response',
       requestId,
-      error: error.message || 'Codex LLM request failed',
+      error: error.message || 'LLM request failed',
     });
 
     debugLog('llm_request failed', { requestId, error: error.message });
@@ -342,9 +506,24 @@ export function getMcpSession(sessionId) {
 }
 
 /**
- * Send message to native host (fire and forget)
+ * Send message to MCP server/CLI.
+ * Routes through WebSocket relay when connected, falls back to native host.
  */
 function sendToNativeHost(message) {
+  // Try WebSocket first (real-time, no file I/O)
+  if (relaySocket && relaySocket.readyState === WebSocket.OPEN) {
+    try {
+      // Normalize outgoing message types for the relay
+      // The relay broadcasts to all MCP/CLI consumers
+      const wsMessage = normalizeOutgoingMessage(message);
+      relaySocket.send(JSON.stringify(wsMessage));
+      return;
+    } catch (e) {
+      console.warn('[MCP Bridge] WebSocket send failed, falling back to native host:', e.message);
+    }
+  }
+
+  // Fall back to native host (file-based IPC)
   try {
     const port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
     port.postMessage(message);
@@ -352,6 +531,30 @@ function sendToNativeHost(message) {
   } catch (e) {
     console.error('[MCP Bridge] Send error:', e);
   }
+}
+
+/**
+ * Normalize outgoing messages from extension format to the format
+ * expected by MCP server/CLI consumers.
+ *
+ * Native host bridge translates mcp_task_update → task_update etc.
+ * For WebSocket, we do this translation here.
+ */
+function normalizeOutgoingMessage(message) {
+  const { type, ...rest } = message;
+
+  // Map from extension message types to consumer-expected types
+  const typeMap = {
+    'mcp_task_update': 'task_update',
+    'mcp_task_complete': 'task_complete',
+    'mcp_task_error': 'task_error',
+    'mcp_screenshot_result': 'screenshot',
+    'mcp_get_info': 'mcp_get_info',
+    'mcp_llm_response': 'llm_response',
+  };
+
+  const mappedType = typeMap[type] || type;
+  return { type: mappedType, ...rest };
 }
 
 /**

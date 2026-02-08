@@ -14,9 +14,9 @@
  *   llm-browser screenshot <session_id>
  */
 import { existsSync, readFileSync, watch } from 'fs';
-import { NativeHostConnection } from './ipc/index.js';
+import { WebSocketClient } from './ipc/websocket-client.js';
 import { getOrchestrator } from './orchestrator/index.js';
-import { initializeLLMClient, handleLLMResponse, getPendingRequestIds } from './llm/client.js';
+import { initializeLLMClient, handleLLMResponse } from './llm/client.js';
 import { writeSessionStatus, readSessionStatus, appendSessionLog, addTraceEntry, listSessions, deleteSessionFiles, getSessionLogPath, } from './cli/session-files.js';
 // Parse command line arguments
 const args = process.argv.slice(2);
@@ -24,22 +24,20 @@ const command = args[0];
 // Shared state
 let connection;
 let orchestrator;
-// Track active session IDs for filtered polling
-// This prevents race conditions with MCP server consuming our results
-const activeSessionIds = new Set();
 /**
- * Initialize and connect to native host
+ * Initialize and connect to WebSocket relay
  */
 async function initConnection() {
     if (connection?.isConnected())
         return;
-    connection = new NativeHostConnection({
-        onStderr: (text) => console.error(`[Native] ${text}`),
-        onDisconnect: (code) => console.error(`[CLI] Native host exited: ${code}`),
+    connection = new WebSocketClient({
+        role: 'cli',
+        autoStartRelay: true,
+        onDisconnect: () => console.error('[CLI] Relay connection lost, will reconnect'),
     });
     connection.onMessage(handleNativeMessage);
     await connection.connect();
-    console.error('[CLI] Connected to native host');
+    console.error('[CLI] Connected to WebSocket relay');
 }
 /**
  * Handle message from native host
@@ -53,21 +51,6 @@ function handleNativeMessage(message) {
             error: data.error,
             usage: data.usage,
         });
-        return;
-    }
-    // Handle batch results (from mcp_poll_results)
-    if (type === 'mcp_results' && Array.isArray(data.results)) {
-        for (const result of data.results) {
-            if (result.type === 'llm_response') {
-                handleLLMResponse(result.requestId, {
-                    content: result.content,
-                    error: result.error,
-                    usage: result.usage,
-                });
-                continue;
-            }
-            processSessionResult(result);
-        }
         return;
     }
     // Handle single result
@@ -138,8 +121,6 @@ function processSessionResult(result) {
                 appendSessionLog(sessionId, `[COMPLETE] ${answer}`);
                 console.log(`\n[CLI] Task completed: ${sessionId}`);
                 console.log(answer);
-                // Clean up session tracking
-                activeSessionIds.delete(sessionId);
             }
             break;
         case 'task_error':
@@ -151,35 +132,14 @@ function processSessionResult(result) {
             });
             appendSessionLog(sessionId, `[ERROR] ${data.error}`);
             console.error(`\n[CLI] Task error: ${data.error}`);
-            // Clean up session tracking
-            activeSessionIds.delete(sessionId);
             break;
     }
 }
 /**
- * Send message to native host (wrapper for compatibility)
+ * Send message to relay (wrapper for orchestrator callback)
  */
 async function sendToNative(message) {
     await connection.send(message);
-}
-/**
- * Start polling for results from the extension
- * Uses filtered polling to only receive results for our pending requests
- */
-function startPolling() {
-    setInterval(() => {
-        if (!connection?.isConnected())
-            return;
-        // Collect all IDs we're interested in: pending LLM requests + active sessions
-        const pendingLLMIds = getPendingRequestIds();
-        const sessionIds = Array.from(activeSessionIds);
-        const requestIds = [...pendingLLMIds, ...sessionIds];
-        // Pass request IDs filter to prevent race condition with MCP server
-        // Note: Errors are logged (not swallowed) but don't crash the polling loop
-        connection.send({ type: 'mcp_poll_results', requestIds }).catch(err => {
-            console.error('[CLI] Poll send error:', err.message);
-        });
-    }, 500);
 }
 // ============================================================================
 // Commands
@@ -214,9 +174,6 @@ async function cmdStart() {
     await initConnection();
     initializeLLMClient(sendToNative);
     orchestrator = getOrchestrator();
-    // Start polling BEFORE starting the task
-    // This is critical because planning phase sends LLM requests that need polling
-    startPolling();
     // Set up browser execute callback - bridges orchestrator to native host
     orchestrator.setBrowserExecuteCallback(async (sessionId, taskText, taskUrl, taskContext, siteKnowledge) => {
         let fullContext = taskContext || '';
@@ -233,8 +190,6 @@ async function cmdStart() {
     });
     // Start the task
     const result = await orchestrator.startTask({ task, url, context });
-    // Track this session for filtered polling (prevents race condition with MCP server)
-    activeSessionIds.add(result.sessionId);
     // Write initial status
     writeSessionStatus(result.sessionId, {
         session_id: result.sessionId,

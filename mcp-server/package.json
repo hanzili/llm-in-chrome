@@ -11,7 +11,8 @@
   "type": "module",
   "bin": {
     "llm-in-chrome-mcp": "./dist/index.js",
-    "llm-browser": "./dist/cli.js"
+    "llm-browser": "./dist/cli.js",
+    "llm-relay": "./dist/relay/server.js"
   },
   "files": [
     "dist",
@@ -27,10 +28,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
-    "mem0ai": "^2.2.2"
+    "mem0ai": "^2.2.2",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.3.0"
   },
   "engines": {

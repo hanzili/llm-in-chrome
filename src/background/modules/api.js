@@ -156,7 +156,7 @@ const MODEL_TIER_MAP = {
  * Codex model tier mapping - for OpenAI Codex (ChatGPT Pro/Plus)
  */
 const CODEX_MODEL_TIER_MAP = {
-  fast: 'gpt-5.1-mini',                   // Quick - good for simple tasks
+  fast: 'gpt-5.1-codex',                  // gpt-5.1-mini not supported via Codex with ChatGPT account
   smart: 'gpt-5.1-codex',                 // Balanced - good for planning
   powerful: 'gpt-5.1-codex-max',          // Best quality - complex reasoning
 };
@@ -183,11 +183,14 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   let modelTier;
   let returnFullResponse = false;
 
+  let system;
+
   if (typeof promptOrOptions === 'object' && promptOrOptions.messages) {
-    // New signature: { messages, maxTokens, modelTier }
+    // New signature: { messages, maxTokens, modelTier, system }
     messages = promptOrOptions.messages;
     maxTokens = promptOrOptions.maxTokens || 800;
     modelTier = promptOrOptions.modelTier;
+    system = promptOrOptions.system;
     returnFullResponse = true;
   } else {
     // Legacy signature: (prompt, maxTokens)
@@ -205,18 +208,21 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
     console.log(`[API] callLLMSimple: Using model tier "${modelTier}" → ${modelToUse}`);
   }
 
-  // Build request body (non-streaming)
+  // Claude Code credentials require streaming requests (non-streaming gets rejected)
+  const useStreaming = config.authMethod === 'oauth';
+
   const requestBody = {
     model: modelToUse,
     max_tokens: maxTokens,
     messages: messages,
-    stream: false,  // Non-streaming request
+    ...(system ? { system } : {}),
+    stream: useStreaming,
   };
 
   // Use Anthropic API directly (native host will add credentials from keychain)
   const apiUrl = 'https://api.anthropic.com/v1/messages';
 
-  console.log(`[API] callLLMSimple: Routing through native host for keychain credentials`);
+  console.log(`[API] callLLMSimple: Routing through native host (streaming: ${useStreaming})`);
 
   // Route through native host (which loads credentials from keychain)
   const result = await callLLMSimpleViaProxy(apiUrl, requestBody);
@@ -229,40 +235,64 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
 }
 
 /**
- * Make non-streaming API call through native host proxy
- * Uses keychain credentials (same as streaming API)
+ * Make API call through native host proxy
+ * Handles both streaming and non-streaming responses.
+ * Uses keychain credentials (same as browser agent).
  * @private
  */
 async function callLLMSimpleViaProxy(apiUrl, requestBody) {
-  const TIMEOUT_MS = 60000; // 60 second timeout for non-streaming
+  const TIMEOUT_MS = 90000; // 90 second timeout
 
   return new Promise((resolve, reject) => {
     const port = getNativeHostPort();
     let settled = false;
 
+    // Streaming state (for stream: true requests)
+    let streamResult = { content: [], stop_reason: null, usage: null };
+    let currentTextBlock = null;
+
     const timeoutId = setTimeout(() => {
       if (!settled) {
         settled = true;
-        reject(new Error('LLM request timed out after 60 seconds'));
+        reject(new Error('LLM request timed out after 90 seconds'));
       }
     }, TIMEOUT_MS);
 
     const messageListener = (message) => {
       if (settled) return;
 
-      if (message.type === 'api_response') {
-        // Non-streaming response from native host
+      if (message.type === 'stream_chunk') {
+        // Streaming response — accumulate text
+        const event = message.data;
+
+        if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
+          currentTextBlock = { type: 'text', text: '' };
+        } else if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta' && currentTextBlock) {
+          currentTextBlock.text += event.delta.text;
+        } else if (event.type === 'content_block_stop' && currentTextBlock) {
+          streamResult.content.push(currentTextBlock);
+          currentTextBlock = null;
+        } else if (event.type === 'message_delta') {
+          streamResult.stop_reason = event.delta?.stop_reason;
+          streamResult.usage = event.usage;
+        }
+      } else if (message.type === 'stream_end') {
+        // Streaming complete
+        settled = true;
+        clearTimeout(timeoutId);
+        port.onMessage.removeListener(messageListener);
+        resolve(streamResult);
+      } else if (message.type === 'api_response') {
+        // Non-streaming response
         settled = true;
         clearTimeout(timeoutId);
         port.onMessage.removeListener(messageListener);
 
-        // Check for HTTP errors
         if (message.status !== 200) {
           reject(new Error(`API error: ${message.status} - ${message.body?.substring(0, 200)}`));
           return;
         }
 
-        // Parse the JSON response body
         try {
           const parsed = JSON.parse(message.body);
           resolve(parsed);
@@ -274,6 +304,9 @@ async function callLLMSimpleViaProxy(apiUrl, requestBody) {
         clearTimeout(timeoutId);
         port.onMessage.removeListener(messageListener);
         reject(new Error(message.error || 'API call failed'));
+      } else if (message.type === 'tokens_refreshed') {
+        // Token refreshed, native host will retry — just wait
+        console.log('[API] callLLMSimpleViaProxy: Tokens refreshed, waiting for retry');
       }
     };
 
@@ -837,9 +870,31 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
 
   // If calling Codex API (ChatGPT backend), use the provider's native messaging call
   // CodexProvider has its own call() method that handles native messaging with OpenAI SSE format
+  // Falls back to ccproxy if Codex subscription is expired (429)
   if (apiUrl.includes('chatgpt.com') && config.authMethod === 'codex_oauth') {
-    return provider.call(messages, systemPrompt, tools, onTextChunk, log);
+    try {
+      return await provider.call(messages, systemPrompt, tools, onTextChunk, log);
+    } catch (e) {
+      if (e.message.includes('429') || e.message.includes('usage_limit')) {
+        console.log('[API] Codex limit reached, falling back to ccproxy');
+        // Switch to ccproxy for the rest of this session (in-memory only)
+        config.apiBaseUrl = 'http://127.0.0.1:8000/claude/v1/messages';
+        config.authMethod = '';
+        config.model = 'claude-haiku-4-5-20251001';
+        // Fall through to direct fetch below with ccproxy URL
+      } else {
+        throw e;
+      }
+    }
   }
+
+  // Rebuild provider/request if config was changed by Codex fallback
+  const activeProvider = createProvider(config.apiBaseUrl || '', config);
+  const activeIsClaudeModel = activeProvider.getName() === 'anthropic';
+  const activeSystemPrompt = buildSystemPrompt({ isClaudeModel: activeIsClaudeModel });
+  const activeTools = getToolsForUrl(currentUrl);
+  const activeRequestBody = activeProvider.buildRequestBody(messages, activeSystemPrompt, activeTools, useStreaming);
+  const activeApiUrl = activeProvider.buildUrl(useStreaming);
 
   // Add timeout to prevent hanging requests (2 minutes for API calls)
   const timeoutMs = 120000;
@@ -848,10 +903,10 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
 
   // Combine user abort signal with timeout
   const combinedSignal = signal || timeoutController.signal;
-  const requestBodyStr = JSON.stringify(requestBody);
+  const requestBodyStr = JSON.stringify(activeRequestBody);
 
   const makeRequest = async (headers) => {
-    return await fetch(apiUrl, {
+    return await fetch(activeApiUrl, {
       method: 'POST',
       headers: headers,
       body: requestBodyStr,
@@ -912,10 +967,10 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
     // Handle response based on streaming mode
     let result;
     if (useStreaming) {
-      result = await provider.handleStreaming(response, onTextChunk, log);
+      result = await activeProvider.handleStreaming(response, onTextChunk, log);
     } else {
       const jsonResponse = await response.json();
-      result = provider.normalizeResponse(jsonResponse);
+      result = activeProvider.normalizeResponse(jsonResponse);
     }
 
     const duration = Date.now() - startTime;

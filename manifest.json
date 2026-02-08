@@ -21,7 +21,8 @@
     "sidePanel",
     "downloads",
     "identity",
-    "nativeMessaging"
+    "nativeMessaging",
+    "alarms"
   ],
 
   "host_permissions": [

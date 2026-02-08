@@ -1,7 +1,8 @@
 /**
  * IPC Module - Communication with Chrome Extension
  *
- * This module provides a clean abstraction over the native messaging protocol
- * used to communicate with the Chrome extension.
+ * WebSocketClient is the primary transport (via WebSocket relay).
+ * NativeHostConnection is kept for reference/fallback.
  */
+export { WebSocketClient } from './websocket-client.js';
 export { NativeHostConnection, getDefaultConnection, resetDefaultConnection, } from './native-host.js';

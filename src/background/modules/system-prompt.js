@@ -114,7 +114,7 @@ The tabId parameter is REQUIRED for all tools that interact with tabs. You must 
 - form_input tool: {"ref": "ref_1", "value": "text", "tabId": <TAB_ID>}
 ## Creating New Tabs
 Use the tabs_create tool to create new empty tabs:
-- tabs_create: {} (creates a new tab at chrome://newtab in the current group)
+- tabs_create: {} (creates a new empty tab)
 ## Best Practices
 - ALWAYS call the "tabs_context" tool first if you don't have a valid tab ID
 - Use multiple tabs to work more efficiently (e.g., researching in one tab while filling forms in another)

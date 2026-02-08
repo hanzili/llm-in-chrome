@@ -2,15 +2,12 @@
 /**
  * Native Messaging Host for LLM in Chrome
  *
- * This serves as a bridge between:
- * 1. Chrome Extension (via native messaging)
- * 2. MCP Server (via file-based IPC)
- * 3. Claude/Codex APIs (for OAuth proxy)
+ * Provides two services to the Chrome extension via native messaging:
+ * 1. Credential reading (Claude CLI + Codex CLI)
+ * 2. API proxy with Claude Code impersonation headers
+ *    (browsers can't set user-agent, so we proxy through Node.js)
  *
- * File-based IPC for MCP:
- * - MCP writes to: ~/.llm-in-chrome/mcp-inbox.json
- * - Extension reads from inbox, writes to: ~/.llm-in-chrome/mcp-outbox.json
- * - MCP reads from outbox
+ * IPC between MCP server/CLI and extension is handled by WebSocket relay.
  */
 const fs = require('fs');
 const os = require('os');
@@ -23,12 +20,8 @@ const OAUTH_CONFIG = {
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
 };
 
-// MCP IPC paths
+// Debug log directory
 const MCP_DIR = path.join(os.homedir(), '.llm-in-chrome');
-const MCP_INBOX = path.join(MCP_DIR, 'mcp-inbox.json');   // MCP server writes here
-const MCP_OUTBOX = path.join(MCP_DIR, 'mcp-outbox.json'); // Extension writes here
-
-// Ensure MCP directory exists
 try {
   if (!fs.existsSync(MCP_DIR)) {
     fs.mkdirSync(MCP_DIR, { recursive: true });
@@ -54,12 +47,7 @@ function send(message) {
   len.writeUInt32LE(buffer.length, 0);
   process.stdout.write(len);
   process.stdout.write(buffer);
-  // Extra debug for mcp_results
-  if (message.type === 'mcp_results') {
-    log(`Sent: ${message.type} with ${message.results?.length || 0} results: ${JSON.stringify(message.results?.map(r => r.type) || [])}`);
-  } else {
-    log(`Sent: ${message.type}`);
-  }
+  log(`Sent: ${message.type}`);
 }
 
 // Read Claude CLI credentials from file or macOS Keychain
@@ -467,135 +455,9 @@ async function proxyApiCall(data, isRetry = false) {
   }
 }
 
-// ============================================
-// MCP FILE-BASED IPC FUNCTIONS
-// ============================================
-
-/**
- * Write command to MCP inbox (for MCP server to send to extension)
- */
-function writeMcpInbox(command) {
-  try {
-    // Read existing inbox
-    let inbox = [];
-    if (fs.existsSync(MCP_INBOX)) {
-      try {
-        inbox = JSON.parse(fs.readFileSync(MCP_INBOX, 'utf8'));
-        if (!Array.isArray(inbox)) inbox = [];
-      } catch (e) {
-        inbox = [];
-      }
-    }
-    // Add new command
-    inbox.push({ ...command, timestamp: Date.now() });
-    fs.writeFileSync(MCP_INBOX, JSON.stringify(inbox, null, 2));
-    log(`MCP inbox: wrote ${command.type} (${inbox.length} pending)`);
-    return true;
-  } catch (e) {
-    log(`MCP inbox write error: ${e.message}`);
-    return false;
-  }
-}
-
-/**
- * Read and clear MCP inbox (for extension to read commands)
- */
-function readMcpInbox() {
-  try {
-    if (!fs.existsSync(MCP_INBOX)) return [];
-    const inbox = JSON.parse(fs.readFileSync(MCP_INBOX, 'utf8'));
-    // Clear inbox after reading
-    fs.writeFileSync(MCP_INBOX, '[]');
-    log(`MCP inbox: read ${inbox.length} commands`);
-    return Array.isArray(inbox) ? inbox : [];
-  } catch (e) {
-    log(`MCP inbox read error: ${e.message}`);
-    return [];
-  }
-}
-
-/**
- * Write result to MCP outbox (for extension to send to MCP server)
- */
-function writeMcpOutbox(result) {
-  try {
-    let outbox = [];
-    if (fs.existsSync(MCP_OUTBOX)) {
-      try {
-        outbox = JSON.parse(fs.readFileSync(MCP_OUTBOX, 'utf8'));
-        if (!Array.isArray(outbox)) outbox = [];
-      } catch (e) {
-        outbox = [];
-      }
-    }
-    outbox.push({ ...result, timestamp: Date.now() });
-    fs.writeFileSync(MCP_OUTBOX, JSON.stringify(outbox, null, 2));
-    log(`MCP outbox: wrote ${result.type} (${outbox.length} pending)`);
-    return true;
-  } catch (e) {
-    log(`MCP outbox write error: ${e.message}`);
-    return false;
-  }
-}
-
-/**
- * Read and clear MCP outbox (for MCP server to read results)
- * @param {string[]} [requestIds] - Optional array of request IDs to consume.
- *   If provided, only entries with matching requestId will be returned and removed.
- *   Entries without matching requestId (or without requestId) are left in the outbox.
- *   If not provided, all entries are consumed (legacy behavior).
- */
-function readMcpOutbox(requestIds) {
-  try {
-    if (!fs.existsSync(MCP_OUTBOX)) return [];
-    const outbox = JSON.parse(fs.readFileSync(MCP_OUTBOX, 'utf8'));
-    if (!Array.isArray(outbox)) return [];
-
-    // If filter is explicitly provided (even empty), use it
-    // Empty array = "I want nothing from outbox, leave everything for others"
-    // Undefined/null = "Consume all (legacy behavior)"
-    if (requestIds === undefined || requestIds === null) {
-      fs.writeFileSync(MCP_OUTBOX, '[]');
-      log(`MCP outbox: read ${outbox.length} results (all - no filter)`);
-      return outbox;
-    }
-
-    // Empty array means "I have no requests, don't consume anything"
-    if (requestIds.length === 0) {
-      log(`MCP outbox: skip (empty filter, ${outbox.length} waiting)`);
-      return [];
-    }
-
-    // Filter: only consume entries matching our requestIds
-    const requestIdSet = new Set(requestIds);
-    const consumed = [];
-    const remaining = [];
-
-    for (const entry of outbox) {
-      if (entry.requestId && requestIdSet.has(entry.requestId)) {
-        consumed.push(entry);
-      } else if (entry.sessionId && requestIdSet.has(entry.sessionId)) {
-        // Also match by sessionId for task updates
-        consumed.push(entry);
-      } else {
-        remaining.push(entry);
-      }
-    }
-
-    // Write back remaining entries
-    fs.writeFileSync(MCP_OUTBOX, JSON.stringify(remaining, null, 2));
-    log(`MCP outbox: read ${consumed.length}/${outbox.length} results (filtered by ${requestIds.length} IDs, ${remaining.length} remaining)`);
-    return consumed;
-  } catch (e) {
-    log(`MCP outbox read error: ${e.message}`);
-    return [];
-  }
-}
-
 // Handle incoming messages
 function handleMessage(msg) {
-  log(`Message: ${msg.type} (full: ${JSON.stringify(msg).substring(0, 200)})`);
-  log(`Type check: "${msg.type}" === "mcp_start_task" ? ${msg.type === 'mcp_start_task'}`);
+  log(`Message: ${msg.type}`);
 
   switch (msg.type) {
     case 'ping':
@@ -623,173 +485,6 @@ function handleMessage(msg) {
         fs.appendFileSync(debugFile, entry);
       } catch (e) {}
       // No response needed - fire and forget
-      break;
-
-    // ============================================
-    // MCP SERVER COMMANDS (from MCP server via stdin)
-    // Write to inbox for extension to pick up
-    // ============================================
-
-    case 'mcp_start_task':
-      log(`ENTERED mcp_start_task CASE`);
-      log(`MCP: Queuing task: ${msg.task?.substring(0, 50)}...`);
-      writeMcpInbox({
-        type: 'start_task',
-        sessionId: msg.sessionId,
-        task: msg.task,
-        url: msg.url,
-        context: msg.context,  // Pass task context for memory/info lookup
-      });
-      send({ type: 'task_queued', sessionId: msg.sessionId });
-      break;
-
-    case 'mcp_send_message':
-      log(`MCP: Queuing message for session ${msg.sessionId}`);
-      writeMcpInbox({
-        type: 'send_message',
-        sessionId: msg.sessionId,
-        message: msg.message,
-      });
-      send({ type: 'message_queued', sessionId: msg.sessionId });
-      break;
-
-    case 'mcp_stop_task':
-      log(`MCP: Queuing stop for session ${msg.sessionId}`);
-      writeMcpInbox({
-        type: 'stop_task',
-        sessionId: msg.sessionId,
-      });
-      send({ type: 'stop_queued', sessionId: msg.sessionId });
-      break;
-
-    case 'mcp_screenshot':
-      log(`MCP: Queuing screenshot for session ${msg.sessionId || 'active'}`);
-      writeMcpInbox({
-        type: 'screenshot',
-        sessionId: msg.sessionId,
-      });
-      send({ type: 'screenshot_queued' });
-      break;
-
-    case 'mcp_get_info_response':
-      // MCP server sending get_info response back to extension
-      log(`MCP: get_info response for ${msg.sessionId}: ${msg.response?.substring(0, 50)}...`);
-      writeMcpInbox({
-        type: 'get_info_response',
-        sessionId: msg.sessionId,
-        requestId: msg.requestId,
-        response: msg.response,
-      });
-      send({ type: 'get_info_response_queued' });
-      break;
-
-    case 'mcp_poll_results':
-      // MCP server polling for results from extension
-      // Pass requestIds filter if provided - only consume matching entries
-      const results = readMcpOutbox(msg.requestIds);
-      send({ type: 'mcp_results', results });
-      break;
-
-    case 'llm_request':
-      // MCP server requesting LLM completion via extension
-      // Routes: MCP → native host (inbox) → extension → native host (proxy_api_call) → API
-      // This preserves Claude Code authentication (user-agent, headers, etc.)
-      log(`MCP: LLM request ${msg.requestId} (tier: ${msg.modelTier || 'default'}): ${msg.prompt?.substring(0, 50)}...`);
-      writeMcpInbox({
-        type: 'llm_request',
-        requestId: msg.requestId,
-        prompt: msg.prompt,
-        systemPrompt: msg.systemPrompt,
-        jsonMode: msg.jsonMode,
-        maxTokens: msg.maxTokens,
-        modelTier: msg.modelTier,
-      });
-      send({ type: 'llm_request_queued', requestId: msg.requestId });
-      break;
-
-    // ============================================
-    // EXTENSION COMMANDS (from Chrome extension via native messaging)
-    // Read from inbox, write results to outbox
-    // ============================================
-
-    case 'poll_mcp_inbox':
-      // Extension checking for MCP commands
-      const commands = readMcpInbox();
-      if (commands.length > 0) {
-        send({ type: 'mcp_commands', commands });
-      } else {
-        send({ type: 'no_commands' });
-      }
-      break;
-
-    case 'mcp_task_update':
-      // Extension sending task progress
-      log(`MCP: Task update for ${msg.sessionId}: ${msg.status}`);
-      writeMcpOutbox({
-        type: 'task_update',
-        sessionId: msg.sessionId,
-        status: msg.status,
-        step: msg.step,
-      });
-      send({ type: 'update_recorded' });
-      break;
-
-    case 'mcp_task_complete':
-      // Extension sending task completion
-      log(`MCP: Task complete for ${msg.sessionId}`);
-      writeMcpOutbox({
-        type: 'task_complete',
-        sessionId: msg.sessionId,
-        result: msg.result,
-      });
-      send({ type: 'complete_recorded' });
-      break;
-
-    case 'mcp_task_error':
-      // Extension sending task error
-      log(`MCP: Task error for ${msg.sessionId}: ${msg.error}`);
-      writeMcpOutbox({
-        type: 'task_error',
-        sessionId: msg.sessionId,
-        error: msg.error,
-      });
-      send({ type: 'error_recorded' });
-      break;
-
-    case 'mcp_screenshot_result':
-      // Extension sending screenshot
-      log(`MCP: Screenshot captured`);
-      writeMcpOutbox({
-        type: 'screenshot',
-        sessionId: msg.sessionId,
-        data: msg.data,
-      });
-      send({ type: 'screenshot_recorded' });
-      break;
-
-    case 'mcp_get_info':
-      // Extension requesting info from Mem0 (via MCP server)
-      log(`MCP: get_info request for ${msg.sessionId}: ${msg.query}`);
-      writeMcpOutbox({
-        type: 'mcp_get_info',
-        sessionId: msg.sessionId,
-        query: msg.query,
-        requestId: msg.requestId,
-      });
-      send({ type: 'get_info_queued', requestId: msg.requestId });
-      break;
-
-    case 'mcp_llm_response':
-      // Extension sending LLM response back to MCP server
-      log(`MCP: LLM response for ${msg.requestId}: ${msg.content?.substring(0, 50) || msg.error}...`);
-      writeMcpOutbox({
-        type: 'llm_response',
-        requestId: msg.requestId,
-        content: msg.content,
-        error: msg.error,
-        usage: msg.usage,
-      });
-      send({ type: 'llm_response_recorded', requestId: msg.requestId });
       break;
 
     case 'read_cli_credentials':
@@ -835,7 +530,7 @@ function handleMessage(msg) {
       break;
 
     default:
-      log(`DEFAULT CASE HIT - type: "${msg.type}", typeof: ${typeof msg.type}`);
+      log(`Unknown message type: ${msg.type}`);
       send({ type: 'error', error: `Unknown message type: ${msg.type}` });
   }
 }

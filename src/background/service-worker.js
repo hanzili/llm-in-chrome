@@ -437,15 +437,20 @@ async function runAgentLoop(initialTabId, task, onUpdate, images = [], askBefore
   await loadConfig();
 
   // Create or adopt tab group for this session (receives tabGroupId from client)
+  // Skip tab grouping for MCP sessions with dedicated windows — chrome.tabs.group()
+  // pulls tabs out of their window and into the main window's tab strip
   let sessionTabGroupId = initialTabGroupId;
-  const newGroupId = await ensureTabGroup(initialTabId, sessionTabGroupId);
-  if (newGroupId !== sessionTabGroupId) {
-    // Group was created or changed - notify client
-    sessionTabGroupId = newGroupId;
-    chrome.runtime.sendMessage({
-      type: 'SESSION_GROUP_UPDATE',
-      tabGroupId: sessionTabGroupId
-    }).catch(() => {});
+  const hasDedicatedWindow = mcpSession && mcpSession.windowId;
+  if (!hasDedicatedWindow) {
+    const newGroupId = await ensureTabGroup(initialTabId, sessionTabGroupId);
+    if (newGroupId !== sessionTabGroupId) {
+      // Group was created or changed - notify client
+      sessionTabGroupId = newGroupId;
+      chrome.runtime.sendMessage({
+        type: 'SESSION_GROUP_UPDATE',
+        tabGroupId: sessionTabGroupId
+      }).catch(() => {});
+    }
   }
 
   // Get tab info for system-reminder

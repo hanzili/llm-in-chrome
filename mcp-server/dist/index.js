@@ -21,14 +21,14 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema, } from "@modelcontextprotocol/sdk/types.js";
-// IPC Module - shared native messaging connection
-import { NativeHostConnection } from "./ipc/index.js";
+// IPC Module - WebSocket relay connection (replaces native messaging)
+import { WebSocketClient } from "./ipc/websocket-client.js";
 // Memory layer (Mem0)
 import { initializeMemory, storeContext, searchMemory, deleteSessionMemories, isMemoryAvailable, getRawContext, } from "./memory-lite.js";
 // Orchestrator (manages session state machine)
 import { getOrchestrator } from "./orchestrator/index.js";
 // LLM Client (routes LLM requests through native host)
-import { initializeLLMClient, handleLLMResponse, getPendingRequestIds } from "./llm/client.js";
+import { initializeLLMClient, handleLLMResponse } from "./llm/client.js";
 const pendingScreenshots = new Map();
 // Browser-specific extras (keyed by session ID)
 const browserExtras = new Map();
@@ -71,7 +71,7 @@ function mapStateToLegacyStatus(state) {
     };
     return mapping[state] || "running";
 }
-// Native host connection (using shared IPC module)
+// WebSocket relay connection (replaces native host)
 let connection;
 const TOOLS = [
     {
@@ -323,6 +323,17 @@ async function handleNativeMessage(message) {
                 }
             }
         }
+        return;
+    }
+    // Handle LLM responses directly (they use requestId, not sessionId)
+    if (type === 'llm_response') {
+        const requestId = data.requestId || sessionId;
+        console.error(`[MCP] LLM response received for request: ${requestId}`);
+        handleLLMResponse(requestId, {
+            content: data.content,
+            error: data.error,
+            usage: data.usage,
+        });
         return;
     }
     // Log other message types
@@ -817,7 +828,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                             text: JSON.stringify({
                                 totalSessions: allStatuses.length,
                                 activeSessions: orchestrator.getActiveSessionCount(),
-                                nativeHostConnected: connection?.isConnected() ?? false,
+                                relayConnected: connection?.isConnected() ?? false,
                                 sessions: debugSessions
                             }, null, 2)
                         }]
@@ -837,25 +848,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
     }
 });
-/**
- * Poll for results from extension via native host
- * Uses filtered polling to prevent race conditions with CLI
- */
-async function pollForResults() {
-    if (!connection?.isConnected())
-        return;
-    try {
-        // Collect all IDs we're interested in: pending LLM requests + active sessions
-        const pendingLLMIds = getPendingRequestIds();
-        const sessionIds = orchestrator.getActiveSessionIds();
-        const requestIds = [...pendingLLMIds, ...sessionIds];
-        // Pass request IDs filter to prevent race condition with CLI
-        await connection.send({ type: 'mcp_poll_results', requestIds });
-    }
-    catch (err) {
-        console.error('[MCP] Poll error:', err);
-    }
-}
 // Start server
 async function main() {
     console.error("[MCP] LLM in Chrome MCP Server starting...");
@@ -878,15 +870,16 @@ async function main() {
     });
     console.error("[MCP] Orchestrator initialized");
     try {
-        // Initialize native host connection using shared IPC module
-        connection = new NativeHostConnection({
-            onStderr: (text) => console.error(`[Native] ${text}`),
-            onDisconnect: (code) => console.error(`[MCP] Native host exited: ${code}`),
+        // Initialize WebSocket relay connection (replaces native host)
+        connection = new WebSocketClient({
+            role: 'mcp',
+            autoStartRelay: true,
+            onDisconnect: () => console.error("[MCP] Relay connection lost, will reconnect"),
         });
         connection.onMessage(handleNativeMessage);
         await connection.connect();
-        console.error("[MCP] Connected to native host");
-        // Initialize LLM client (routes requests through native host)
+        console.error("[MCP] Connected to WebSocket relay");
+        // Initialize LLM client (routes requests through relay → extension)
         initializeLLMClient(sendToNative);
         console.error("[MCP] LLM client initialized");
         // Initialize MemoryLite (needs LLM client to be ready)
@@ -902,11 +895,10 @@ async function main() {
         catch (err) {
             console.error("[MCP] Memory layer initialization failed:", err);
         }
-        // Start polling for results every 500ms
-        setInterval(pollForResults, 500);
+        // No polling needed — WebSocket pushes messages in real-time
     }
     catch (err) {
-        console.error("[MCP] Warning: Could not connect to native host:", err);
+        console.error("[MCP] Warning: Could not connect to relay:", err);
     }
     const transport = new StdioServerTransport();
     await server.connect(transport);

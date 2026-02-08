@@ -1,131 +1,84 @@
 /**
  * LLM Client Module
  *
- * Routes LLM requests through the native host to the Chrome extension,
- * which uses its multi-provider system (Anthropic, OpenAI, Google, etc.).
+ * Calls ccproxy (local Claude Code proxy) directly via HTTP.
+ * No extension dependency — planning/explorer agents don't need the browser.
  *
- * This allows the MCP server's agents (Planner, Explorer) to use LLM
- * intelligence without duplicating the provider infrastructure.
- *
- * Flow:
- * MCP Server → Native Host → Extension → LLM Provider → Response
+ * Flow: MCP Server → ccproxy (localhost:8000) → Anthropic API
  */
-// Map of pending requests by requestId
-const pendingRequests = new Map();
-// Callback to send messages to native host (set by index.ts)
-let sendToNativeCallback = null;
-// Default timeout for LLM requests (30 seconds)
-const DEFAULT_TIMEOUT_MS = 30000;
+// ccproxy endpoint
+const CCPROXY_URL = "http://127.0.0.1:8000/claude/v1/messages";
+// Model tier → Anthropic model ID
+const MODEL_MAP = {
+    fast: "claude-haiku-4-5-20251001",
+    smart: "claude-sonnet-4-5-20250929",
+    powerful: "claude-opus-4-5-20251101",
+};
+const DEFAULT_TIMEOUT_MS = 60000; // 60s — LLM calls can be slow
 /**
- * Initialize the LLM client with the sendToNative callback
- *
- * Must be called before using askLLM()
- */
-export function initializeLLMClient(sendToNative) {
-    sendToNativeCallback = sendToNative;
-    console.error("[LLM] Client initialized");
-}
-/**
- * Generate a unique request ID
- */
-function generateRequestId() {
-    return `llm-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-}
-/**
- * Send an LLM request and wait for the response
- *
- * Routes through: MCP Server → Native Host → Extension → LLM Provider
- *
- * @param request - The LLM request (prompt, systemPrompt, options)
- * @param timeoutMs - Timeout in milliseconds (default: 30s)
- * @returns The LLM response
- * @throws Error if timeout or communication failure
+ * Send an LLM request directly to ccproxy and return the response.
  */
 export async function askLLM(request, timeoutMs = DEFAULT_TIMEOUT_MS) {
-    if (!sendToNativeCallback) {
-        throw new Error("LLM client not initialized. Call initializeLLMClient() first.");
-    }
-    const requestId = generateRequestId();
-    const startTime = Date.now();
-    console.error(`[LLM] askLLM called at ${new Date().toISOString()}, requestId=${requestId}, timeout=${timeoutMs}ms`);
-    return new Promise((resolve, reject) => {
-        // Set up timeout
-        const timeout = setTimeout(() => {
-            const elapsed = Date.now() - startTime;
-            console.error(`[LLM] TIMEOUT fired for ${requestId} after ${elapsed}ms (expected ${timeoutMs}ms)`);
-            pendingRequests.delete(requestId);
-            reject(new Error(`LLM request timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-        // Store pending request
-        pendingRequests.set(requestId, { resolve, reject, timeout });
-        // Send to native host
-        sendToNativeCallback({
-            type: "llm_request",
-            requestId,
-            prompt: request.prompt,
-            systemPrompt: request.systemPrompt,
-            jsonMode: request.jsonMode,
-            maxTokens: request.maxTokens,
-            modelTier: request.modelTier, // "fast", "smart", or "powerful"
-        }).catch((err) => {
-            clearTimeout(timeout);
-            pendingRequests.delete(requestId);
-            reject(new Error(`Failed to send LLM request: ${err.message}`));
+    const model = MODEL_MAP[request.modelTier || "smart"];
+    const body = {
+        model,
+        max_tokens: request.maxTokens || 2000,
+        messages: [{ role: "user", content: request.prompt }],
+        ...(request.systemPrompt ? { system: request.systemPrompt } : {}),
+    };
+    console.error(`[LLM] Calling ccproxy: model=${model}, prompt=${request.prompt.substring(0, 60)}...`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(CCPROXY_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+            signal: controller.signal,
         });
-    });
-}
-/**
- * Handle LLM response from native host
- *
- * Called by processResult() in index.ts when a response arrives
- */
-export function handleLLMResponse(requestId, response) {
-    console.error(`[LLM] handleLLMResponse called at ${new Date().toISOString()} for requestId=${requestId}`);
-    const pending = pendingRequests.get(requestId);
-    if (!pending) {
-        console.error(`[LLM] Received response for unknown request: ${requestId} (request may have timed out already)`);
-        console.error(`[LLM] Current pending requests: ${Array.from(pendingRequests.keys()).join(', ') || '(none)'}`);
-        return;
-    }
-    console.error(`[LLM] Response matched pending request, resolving...`);
-    clearTimeout(pending.timeout);
-    pendingRequests.delete(requestId);
-    if (response.error) {
-        pending.reject(new Error(response.error));
-        return;
-    }
-    if (!response.content) {
-        pending.reject(new Error("LLM returned empty response"));
-        return;
-    }
-    // Try to parse as JSON if it looks like JSON
-    let json = undefined;
-    const trimmed = response.content.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-        try {
-            json = JSON.parse(trimmed);
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`ccproxy ${response.status}: ${errorText.substring(0, 200)}`);
         }
-        catch {
-            // Not valid JSON, that's fine
+        const result = await response.json();
+        const content = result.content?.find((b) => b.type === "text")?.text || "";
+        console.error(`[LLM] Response: ${content.length} chars, model=${model}`);
+        // Try to parse as JSON if it looks like JSON
+        let json = undefined;
+        const trimmed = content.trim();
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            try {
+                json = JSON.parse(trimmed);
+            }
+            catch {
+                // Not valid JSON, that's fine
+            }
         }
+        return {
+            content,
+            json,
+            usage: result.usage
+                ? { inputTokens: result.usage.input_tokens, outputTokens: result.usage.output_tokens }
+                : undefined,
+        };
     }
-    pending.resolve({
-        content: response.content,
-        json,
-        usage: response.usage,
-    });
+    catch (err) {
+        if (err.name === "AbortError") {
+            throw new Error(`LLM request timed out after ${timeoutMs}ms`);
+        }
+        throw err;
+    }
+    finally {
+        clearTimeout(timeout);
+    }
 }
 /**
  * Convenience method: Ask LLM and expect JSON response
- *
- * Throws if response is not valid JSON
  */
 export async function askLLMForJSON(request, timeoutMs) {
     const response = await askLLM({ ...request, jsonMode: true }, timeoutMs);
     if (!response.json) {
-        // Try harder to extract JSON
         const content = response.content.trim();
-        // Try to find JSON in markdown code blocks
         const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
         if (jsonMatch) {
             try {
@@ -140,48 +93,27 @@ export async function askLLMForJSON(request, timeoutMs) {
     return response.json;
 }
 /**
- * Check if LLM client is available
+ * Check if LLM client is available (always true with ccproxy)
  */
 export function isLLMAvailable() {
-    return sendToNativeCallback !== null;
+    return true;
 }
-/**
- * Get count of pending LLM requests (for debugging)
- */
+// ── Legacy exports (kept for compatibility but no longer needed) ──
+export function initializeLLMClient(_sendToNative) {
+    console.error("[LLM] Client initialized (using ccproxy directly, sendToNative callback ignored)");
+}
+export function handleLLMResponse(requestId, _response) {
+    console.error(`[LLM] handleLLMResponse called for ${requestId} — ignored (using ccproxy directly)`);
+}
 export function getPendingRequestCount() {
-    return pendingRequests.size;
+    return 0;
 }
-/**
- * Get IDs of all pending LLM requests (for filtered polling)
- */
 export function getPendingRequestIds() {
-    return Array.from(pendingRequests.keys());
+    return [];
 }
 /**
- * Send a debug log message through the native host.
- * This allows agent logs to appear in the mcp-debug.log file.
- *
- * @param source - The source of the log (e.g., "PlanningAgent", "ExplorerAgent")
- * @param message - The log message
- * @param data - Optional additional data
+ * Send a debug log message (falls back to console.error since we no longer need native host)
  */
 export async function sendAgentLog(source, message, data) {
-    if (!sendToNativeCallback) {
-        // Fall back to console.error if native host not connected
-        console.error(`[${source}] ${message}`, data || "");
-        return;
-    }
-    try {
-        await sendToNativeCallback({
-            type: "agent_log",
-            source,
-            message,
-            data,
-            timestamp: new Date().toISOString(),
-        });
-    }
-    catch (e) {
-        // Silent fail, also log to console
-        console.error(`[${source}] ${message}`, data || "");
-    }
+    console.error(`[${source}] ${message}`, data || "");
 }

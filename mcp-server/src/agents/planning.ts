@@ -90,27 +90,13 @@ interface ToolCall {
 // ============================================================================
 
 const TOOL_DESCRIPTIONS = `
-Available tools (respond with JSON to call them):
-
-1. search_knowledge(query: string)
-   Search all site knowledge files. Use to find if we have knowledge about a topic/domain.
-   Example: [{"type":"tool_use","id":"1","name":"search_knowledge","input":{"query":"amazon checkout"}}]
-
-2. read_knowledge(domain: string)
-   Read full knowledge file for a domain. Use after identifying the target domain.
-   Example: [{"type":"tool_use","id":"2","name":"read_knowledge","input":{"domain":"amazon.com"}}]
-
-3. query_memory(query: string)
-   Query memory for user-specific information (preferences, credentials, past interactions).
-   Example: [{"type":"tool_use","id":"3","name":"query_memory","input":{"query":"user email"}}]
-
-4. list_domains()
-   List all domains we have knowledge files for.
-   Example: [{"type":"tool_use","id":"4","name":"list_domains","input":{}}]
-
-5. finish_planning(domain?, collected_info?, missing_info?, ready_to_execute, reasoning?)
-   Signal planning is complete. MUST call this when done.
-   Example: [{"type":"tool_use","id":"5","name":"finish_planning","input":{"domain":"example.com","ready_to_execute":true,"reasoning":"Found site knowledge, ready to proceed"}}]
+<tools>
+1. search_knowledge(query) — Search all site knowledge files for a topic or domain.
+2. read_knowledge(domain) — Read the full knowledge file for a specific domain.
+3. query_memory(query) — Query memory for user-specific info (preferences, credentials).
+4. list_domains() — List all domains we have knowledge files for.
+5. finish_planning(domain?, collected_info?, missing_info?, ready_to_execute, reasoning?, exploration?) — Signal planning is complete.
+</tools>
 `;
 
 // ============================================================================
@@ -413,93 +399,93 @@ function parseContext(context?: string): Record<string, string> {
   return info;
 }
 
-/**
- * Determine what type of exploration is needed (if any)
- *
- * Logic:
- * 1. No site knowledge → need quick overview
- * 2. Have overview but task is complex (multi-step workflow) → need workflow exploration
- * 3. Simple tasks or already have relevant knowledge → no exploration
- */
-function determineExplorationNeeded(
-  domain: string | undefined,
-  siteKnowledge: SiteKnowledge | undefined,
-  task: string
-): ExplorationRecommendation {
-  // If no domain identified, can't explore
-  if (!domain) {
-    return { type: 'none' };
-  }
-
-  // If no site knowledge exists, need quick overview
-  if (!siteKnowledge) {
-    return {
-      type: 'overview',
-      reason: `No knowledge for ${domain} - need quick overview`,
-    };
-  }
-
-  // Check if task seems to need a workflow we might not have
-  // Look for action words that suggest multi-step processes
-  const workflowKeywords = [
-    'apply', 'submit', 'sign up', 'register', 'checkout', 'purchase',
-    'book', 'schedule', 'create', 'post', 'upload', 'send message',
-    'connect', 'follow', 'subscribe', 'order', 'reserve'
-  ];
-
-  const taskLower = task.toLowerCase();
-  const matchedWorkflow = workflowKeywords.find(kw => taskLower.includes(kw));
-
-  if (matchedWorkflow) {
-    // Check if site knowledge already mentions this workflow
-    const knowledgeLower = siteKnowledge.content.toLowerCase();
-    if (!knowledgeLower.includes(matchedWorkflow)) {
-      return {
-        type: 'workflow',
-        task: task,
-        reason: `Task involves "${matchedWorkflow}" but knowledge doesn't cover this workflow`,
-      };
-    }
-  }
-
-  // For simple tasks (read, find, search, look, tell me) - no exploration needed
-  const simpleKeywords = ['read', 'find', 'search', 'look', 'tell me', 'what is', 'show me', 'get'];
-  if (simpleKeywords.some(kw => taskLower.includes(kw))) {
-    return { type: 'none' };
-  }
-
-  // Default: no exploration needed
-  return { type: 'none' };
-}
-
 // ============================================================================
 // Main Agentic Loop
 // ============================================================================
 
-const MAX_STEPS = 6;
-const LLM_TIMEOUT_MS = 20000; // 20 seconds per LLM call
-const TOTAL_PLANNING_TIMEOUT_MS = 60000; // 60 seconds total for all planning
+const LLM_TIMEOUT_MS = 30000; // 30 seconds per LLM call
+const TOTAL_PLANNING_TIMEOUT_MS = 180000; // 3 minutes safety net
 
-const SYSTEM_PROMPT = `You are a Planning Agent that gathers context before a browser automation task.
+const SYSTEM_PROMPT = `You are the Planning Agent. You gather context before a Browser Agent executes a web automation task.
 
-Your job:
+<role>
+Your job is to:
 1. Identify the target domain from the task
-2. Check if we have existing site knowledge (use search_knowledge or read_knowledge)
-3. Query memory for user-specific info if needed (preferences, credentials)
-4. Call finish_planning when ready
+2. Check if we have existing site knowledge
+3. Query memory for user-specific info if needed
+4. Decide whether the Browser Agent needs site exploration before executing
+5. Call finish_planning with your findings
+</role>
 
-IMPORTANT: Respond ONLY with JSON tool calls. No natural language.
+<response_format>
+Respond ONLY with a single JSON tool call per message. No natural language.
 
-Response format (always use this exact structure):
-[{"type":"tool_use","id":"1","name":"TOOL_NAME","input":{...}}]
+Format: [{"type":"tool_use","id":"1","name":"TOOL_NAME","input":{...}}]
 
-Strategy:
-- First: list_domains to see what we know, OR search_knowledge for the target site
-- If domain found: read_knowledge to get full details
-- If user info needed: query_memory
-- Finally: finish_planning with collected context
+IMPORTANT: Call exactly ONE tool per response. Wait for the result before
+deciding your next action. This ensures your decisions are based on real data,
+not assumptions about what a tool might return.
+</response_format>
 
-Be efficient - 2-4 tool calls is typical. Call finish_planning when done.
+<strategy>
+Typical flow (2-4 steps):
+
+Step 1: Check what we know
+  [{"type":"tool_use","id":"1","name":"search_knowledge","input":{"query":"linkedin jobs"}}]
+
+Step 2: Read full knowledge if found
+  [{"type":"tool_use","id":"2","name":"read_knowledge","input":{"domain":"linkedin.com"}}]
+
+Step 3: Query user memory if needed (e.g., task requires personal info)
+  [{"type":"tool_use","id":"3","name":"query_memory","input":{"query":"user resume"}}]
+
+Step 4: Finish with findings
+  [{"type":"tool_use","id":"4","name":"finish_planning","input":{
+    "domain":"linkedin.com",
+    "ready_to_execute":true,
+    "reasoning":"Have site overview but no job application workflow documented",
+    "exploration":{"type":"workflow","reason":"Need to learn the Easy Apply flow"}
+  }}]
+
+You can also start with list_domains() to see all known domains.
+Be efficient — skip steps that aren't needed.
+</strategy>
+
+<exploration_decision>
+When calling finish_planning, include an "exploration" field to tell the system
+whether the Browser Agent needs site exploration before executing the task.
+
+Set exploration.type to:
+
+"none" — No exploration needed. Use when:
+  - Task is simple (search, read, check, tell me, what is, find)
+  - Site is universally known AND task is straightforward
+  - Knowledge file has an ACTIONABLE workflow that covers this task.
+    Actionable means: specific button/link text, page URLs, form field
+    names, CSS selectors — details that only apply to THIS site.
+  - The task doesn't involve multi-step form filling or complex navigation
+
+"overview" — Quick site overview needed. Use when:
+  - No knowledge file exists AND the site is unfamiliar or specialized
+  - You genuinely don't know what the site is or how it's structured
+  - NEVER for universally known sites (Google, Wikipedia, YouTube, Amazon,
+    GitHub, Reddit, Twitter/X, Facebook, LinkedIn, etc.)
+
+"workflow" — Specific workflow exploration needed. Use when:
+  - No knowledge file exists for a complex task (even on well-known sites)
+  - Knowledge file exists but lacks guidance for THIS specific task type
+  - Task involves multi-step interactions: apply, submit, checkout, post,
+    register, book, upload, create account, send message, etc.
+  - Knowledge file has a workflow but it is VAGUE or GENERIC:
+    * Steps use language like "find the button", "fill in the fields",
+      "look for the option" without naming specific UI elements
+    * No specific page URLs, button text, or form field names
+    * Steps could describe ANY website, not specifically THIS site
+    In this case, set reason to explain what details are missing.
+
+Always provide a reason based on what you actually found (or didn't find)
+in the knowledge files.
+</exploration_decision>
 `;
 
 export async function gatherContext(input: PlanningInput): Promise<PlanningOutput> {
@@ -541,8 +527,8 @@ export async function gatherContext(input: PlanningInput): Promise<PlanningOutpu
 
   conversationHistory.push(`User: ${initialPrompt}`);
 
-  // Agentic loop - following Browser Agent pattern
-  while (step < MAX_STEPS && !finishResult) {
+  // Agentic loop - runs until finish_planning is called (with safety timeout)
+  while (!finishResult) {
     // Check total planning timeout
     const elapsed = Date.now() - planningStartTime;
     if (elapsed > TOTAL_PLANNING_TIMEOUT_MS) {
@@ -552,7 +538,7 @@ export async function gatherContext(input: PlanningInput): Promise<PlanningOutpu
     }
 
     step++;
-    log(`Step ${step}/${MAX_STEPS} (${Math.round(elapsed / 1000)}s elapsed)`);
+    log(`Step ${step} (${Math.round(elapsed / 1000)}s elapsed)`);
 
     // Build prompt with conversation history
     const fullPrompt = conversationHistory.join("\n\n") + "\n\nAssistant:";
@@ -609,6 +595,32 @@ export async function gatherContext(input: PlanningInput): Promise<PlanningOutpu
 
     // Reset retry counter on successful tool call
     noToolCallRetries = 0;
+
+    // Check if finish_planning is batched with other tools (hallucination risk)
+    const hasFinish = toolCalls.some(c => c.name === "finish_planning");
+    const hasOtherTools = toolCalls.some(c => c.name !== "finish_planning");
+
+    if (hasFinish && hasOtherTools) {
+      // finish_planning was batched with info-gathering tools — the LLM wrote
+      // its finish result before seeing tool results. Execute the other tools
+      // and force the LLM to re-call finish_planning with real data.
+      await log("finish_planning batched with other tools — executing others first, will re-call finish");
+      planningTrace.push(`Step ${step}: Skipped premature finish_planning (batched with other tools)`);
+
+      const results: string[] = [];
+      for (const call of toolCalls) {
+        if (call.name === "finish_planning") continue; // Skip it
+        await log(`Tool call: ${call.name}`, call.input);
+        planningTrace.push(`Step ${step}: ${call.name}(${JSON.stringify(call.input)})`);
+        const result = await executeTool(call.name, call.input, sessionId);
+        results.push(`[${call.name}] ${result}`);
+        planningTrace.push(`  → ${result.substring(0, 150)}${result.length > 150 ? "..." : ""}`);
+      }
+
+      conversationHistory.push(`Assistant: ${content}`);
+      conversationHistory.push(`User: Tool results:\n${results.join("\n\n")}\n\nNow review the results and call finish_planning based on what you actually found.`);
+      continue;
+    }
 
     // Execute each tool call
     const results: string[] = [];
@@ -672,12 +684,20 @@ export async function gatherContext(input: PlanningInput): Promise<PlanningOutpu
     }
   }
 
-  // Determine if exploration is needed
-  output.explorationNeeded = determineExplorationNeeded(
-    output.domain,
-    output.siteKnowledge,
-    task
-  );
+  // Extract exploration decision from Planning Agent's finish_planning call
+  if (finishResult?.exploration) {
+    const exp = finishResult.exploration;
+    if (exp.type === 'overview') {
+      output.explorationNeeded = { type: 'overview', reason: exp.reason || 'Planning agent requested overview' };
+    } else if (exp.type === 'workflow') {
+      output.explorationNeeded = { type: 'workflow', task: task, reason: exp.reason || 'Planning agent requested workflow exploration' };
+    } else {
+      output.explorationNeeded = { type: 'none' };
+    }
+  } else {
+    // Default to none if Planning Agent didn't specify
+    output.explorationNeeded = { type: 'none' };
+  }
 
   await log(`Complete: domain=${output.domain}, collected=${Object.keys(output.collectedInfo).length}, ready=${output.readyToExecute}, exploration=${output.explorationNeeded?.type || 'none'}, steps=${step}`);
 

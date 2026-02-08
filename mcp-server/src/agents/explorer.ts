@@ -360,87 +360,64 @@ Use the exact format requested. Don't add extra sections.`,
 
   /**
    * Learn from a completed session (post-execution)
-   * Extracts tips and gotchas from what actually happened
+   * Rewrites the knowledge file with specific details from the execution trace
    */
   async learnFromSession(session: Session): Promise<ExplorationResult | null> {
-    if (session.state !== "COMPLETED") {
-      console.error(`[ExplorerAgent] Skipping - session not completed (${session.state})`);
-      return null;
-    }
-
-    if (!session.domain) {
-      console.error(`[ExplorerAgent] Skipping - no domain`);
-      return null;
-    }
+    if (session.state !== "COMPLETED" || !session.domain) return null;
 
     const domain = session.domain;
     console.error(`[ExplorerAgent] Learning from session for ${domain}`);
 
-    const learnings = await this.extractLearnings(session);
+    const updatedContent = await this.updateKnowledge(session);
 
-    if (!learnings) {
-      return {
-        domain,
-        knowledgeUpdated: false,
-        mode: "learning",
-      };
+    if (!updatedContent) {
+      return { domain, knowledgeUpdated: false, mode: "learning" };
     }
 
     try {
-      await appendKnowledge(domain, learnings);
-      console.error(`[ExplorerAgent] Added learnings to ${domain}`);
-
-      return {
-        domain,
-        knowledgeUpdated: true,
-        mode: "learning",
-      };
+      await saveKnowledge(domain, updatedContent);
+      console.error(`[ExplorerAgent] Updated knowledge for ${domain}`);
+      return { domain, knowledgeUpdated: true, mode: "learning" };
     } catch (err) {
-      console.error(`[ExplorerAgent] Failed to save learnings:`, err);
-      return {
-        domain,
-        knowledgeUpdated: false,
-        mode: "learning",
-      };
+      console.error(`[ExplorerAgent] Failed to save updated knowledge:`, err);
+      return { domain, knowledgeUpdated: false, mode: "learning" };
     }
   }
 
   /**
-   * Extract learnings from a completed session
+   * Build a rich trace and ask Sonnet to produce an updated knowledge file
+   * that merges existing knowledge with new details from the execution.
    */
-  private async extractLearnings(session: Session): Promise<string | null> {
-    const traceDescription = session.executionTrace
-      .map(entry => `[${entry.type}] ${entry.description}${entry.error ? ` (Error: ${entry.error})` : ""}`)
-      .join("\n");
+  private async updateKnowledge(session: Session): Promise<string | null> {
+    const domain = session.domain!;
+    const existingKnowledge = await getKnowledge(domain);
+    const existingContent = existingKnowledge?.content || "";
+
+    // Build rich trace from browser agent entries only
+    const richTrace = session.executionTrace
+      .filter(entry => entry.type.startsWith("browser_agent:") || entry.type === "info")
+      .map(entry => {
+        const parts: string[] = [`[${entry.type}] ${entry.description}`];
+        if (entry.url) parts.push(`  URL: ${entry.url}`);
+        if (entry.selector) parts.push(`  Selector: ${entry.selector}`);
+        if (entry.value) parts.push(`  Value: ${entry.value}`);
+        if (entry.error) parts.push(`  Error: ${entry.error}`);
+        if (!entry.success) parts.push(`  Success: false`);
+        return parts.join("\n");
+      })
+      .join("\n\n");
+
+    if (!richTrace.trim()) return null;
 
     const response = await askLLM({
-      prompt: `Task: ${session.task}
-
-Execution trace:
-${traceDescription}
-
-Result: ${session.answer || "No answer recorded"}
-
-Did anything notable happen? Any tips for next time?
-If yes, write a brief "Learned from:" section.
-If nothing notable, respond with: NOTHING_NOTABLE`,
-      systemPrompt: `You are extracting learnings from a browser automation session.
-If you find useful insights, write:
-
-## Learned from: "[brief task description]"
-- Bullet point insights
-- Keep it short and practical
-
-If the task was straightforward with no surprises, just say NOTHING_NOTABLE.`,
-      modelTier: "fast",
-      maxTokens: 300,
+      prompt: `## Task executed\n${session.task}\n\n## Result\n${session.state === "COMPLETED" ? "SUCCESS" : "FAILED"}\n${session.answer || "No answer"}\n\n## Execution trace\n${richTrace}\n\n## Existing knowledge for ${domain}\n${existingContent || "(empty)"}\n\n---\n\nProduce an UPDATED knowledge file.\nRules:\n1. PRESERVE existing workflows NOT touched by this execution\n2. UPDATE/IMPROVE the matching workflow with specific details from the trace\n3. ADD a new workflow section if no existing workflow matches\n4. REMOVE information the trace contradicts\n5. Keep concise and structured\n6. If existing knowledge is already accurate, respond: NO_UPDATE_NEEDED\n\nOutput the complete markdown (starting with # ${domain}), or NO_UPDATE_NEEDED.`,
+      systemPrompt: `You maintain a knowledge base for browser automation.\nGood knowledge: specific button/link text, URLs, form field names, selectors, timing tips.\nBad knowledge: "find the button", "fill in fields", generic steps.`,
+      modelTier: "smart",
+      maxTokens: 2000,
     });
 
-    if (response.content.trim() === "NOTHING_NOTABLE") {
-      return null;
-    }
-
-    return "\n" + response.content;
+    const content = response.content.trim();
+    return content === "NO_UPDATE_NEEDED" ? null : content;
   }
 }
 

@@ -105,12 +105,13 @@ export declare class ExplorerAgent {
     private writeWorkflowMarkdown;
     /**
      * Learn from a completed session (post-execution)
-     * Extracts tips and gotchas from what actually happened
+     * Rewrites the knowledge file with specific details from the execution trace
      */
     learnFromSession(session: Session): Promise<ExplorationResult | null>;
     /**
-     * Extract learnings from a completed session
+     * Build a rich trace and ask Sonnet to produce an updated knowledge file
+     * that merges existing knowledge with new details from the execution.
      */
-    private extractLearnings;
+    private updateKnowledge;
 }
 export declare const explorerAgent: ExplorerAgent;

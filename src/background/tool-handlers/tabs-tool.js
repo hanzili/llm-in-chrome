@@ -128,11 +128,26 @@ export async function handleTabsContext(toolInput, deps) {
  * @returns {Promise<string>} Success message with new tab ID
  */
 export async function handleTabsCreate(toolInput, deps) {
-  const { addTabToGroup, sessionTabGroupId } = deps;
-  const newTab = await chrome.tabs.create({ url: 'chrome://newtab' });
-  // Add to session's tab group
-  await addTabToGroup(newTab.id, sessionTabGroupId);
-  return `Created new tab with ID: ${newTab.id} (added to Agent group)`;
+  const { addTabToGroup, sessionTabGroupId, mcpSession, agentOpenedTabs } = deps;
+
+  const createOpts = { url: 'chrome://newtab' };
+
+  // For MCP sessions with dedicated windows, create tab in that window
+  // (without this, Chrome creates it in whatever window is focused)
+  if (mcpSession?.windowId) {
+    createOpts.windowId = mcpSession.windowId;
+  }
+
+  const newTab = await chrome.tabs.create(createOpts);
+
+  if (mcpSession?.windowId) {
+    // Dedicated window — skip tab grouping (chrome.tabs.group moves tabs across windows)
+    agentOpenedTabs.add(newTab.id);
+  } else {
+    await addTabToGroup(newTab.id, sessionTabGroupId);
+  }
+
+  return `Created new tab with ID: ${newTab.id}`;
 }
 
 /**
