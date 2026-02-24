@@ -4,7 +4,7 @@
  * LLM Browser CLI
  *
  * Command-line interface for browser automation.
- * Alternative to the MCP server - simpler, direct communication.
+ * Sends tasks to the Chrome extension via WebSocket relay.
  *
  * Usage:
  *   llm-browser start "task" --url https://example.com
@@ -16,32 +16,29 @@
  */
 
 import { existsSync, readFileSync, watch } from 'fs';
+import { randomUUID } from 'crypto';
 
 import { WebSocketClient } from './ipc/websocket-client.js';
-import type { NativeMessage } from './ipc/index.js';
-import { getOrchestrator, Orchestrator } from './orchestrator/index.js';
-import { initializeLLMClient, handleLLMResponse } from './llm/client.js';
 import {
   writeSessionStatus,
   readSessionStatus,
   appendSessionLog,
-  addTraceEntry,
   listSessions,
   deleteSessionFiles,
   getSessionLogPath,
+  type SessionFileStatus,
 } from './cli/session-files.js';
 
 // Parse command line arguments
 const args = process.argv.slice(2);
 const command = args[0];
 
-// Shared state
 let connection: WebSocketClient;
-let orchestrator: Orchestrator;
 
-/**
- * Initialize and connect to WebSocket relay
- */
+// Track completion for blocking start
+let pendingResolve: (() => void) | null = null;
+let activeSessionId: string | null = null;
+
 async function initConnection(): Promise<void> {
   if (connection?.isConnected()) return;
 
@@ -51,139 +48,54 @@ async function initConnection(): Promise<void> {
     onDisconnect: () => console.error('[CLI] Relay connection lost, will reconnect'),
   });
 
-  connection.onMessage(handleNativeMessage);
+  connection.onMessage(handleMessage);
   await connection.connect();
   console.error('[CLI] Connected to WebSocket relay');
 }
 
-/**
- * Handle message from native host
- */
-function handleNativeMessage(message: NativeMessage): void {
+function handleMessage(message: any): void {
   const { type, sessionId, ...data } = message;
-
-  // Handle LLM responses (direct)
-  if (type === 'llm_response') {
-    handleLLMResponse(data.requestId || sessionId || '', {
-      content: data.content,
-      error: data.error,
-      usage: data.usage,
-    });
-    return;
-  }
-
-  // Handle single result
-  if (sessionId) {
-    processSessionResult({ type, sessionId, ...data });
-  }
-}
-
-/**
- * Process a session result and update session files
- * (Renamed from processResult for clarity - this handles session-specific results)
- */
-function processSessionResult(result: any): void {
-  const { type, sessionId, ...data } = result;
-
   if (!sessionId) return;
 
-  const currentStep = data.step || data.status || data.message;
+  // Only process events for the session this CLI instance started.
+  // Without this, all relay-connected CLI processes would write
+  // logs/status for every session, causing duplicates.
+  if (activeSessionId && sessionId !== activeSessionId) return;
+
+  const step = data.step || data.status || data.message;
 
   switch (type) {
     case 'task_update':
-      if (currentStep) {
-        // Determine agent from step prefix
-        let agent: 'planning_agent' | 'explorer_agent' | 'browser_agent' = 'browser_agent';
-        if (currentStep.includes('planning_agent')) agent = 'planning_agent';
-        else if (currentStep.includes('explorer_agent')) agent = 'explorer_agent';
-
-        addTraceEntry(sessionId, agent, 'info', currentStep);
-
-        writeSessionStatus(sessionId, {
-          status: 'running',
-          agent_phase: agent,
-        });
+      if (step && step !== 'thinking' && !step.startsWith('[thinking]')) {
+        appendSessionLog(sessionId, step);
+        writeSessionStatus(sessionId, { status: 'running' });
+        console.log(`  ${step.slice(0, 100)}`);
       }
       break;
 
-    case 'task_complete':
-      // First, notify orchestrator so it can handle exploration completion
-      const answer = typeof data.result === 'string' ? data.result : JSON.stringify(data.result);
-
-      // Check if this was an exploration BEFORE marking complete
-      const session = orchestrator.getSession(sessionId);
-      const wasExploring = session?.collectedInfo._exploring === 'true';
-      const originalTask = session?.collectedInfo._originalTask;
-
-      console.error(`[CLI] task_complete: sessionId=${sessionId}, wasExploring=${wasExploring}, originalTask=${originalTask?.substring(0, 50)}`);
-
-      // Notify orchestrator (this transitions to COMPLETED)
-      orchestrator.updateFromBrowserEvent(sessionId, 'complete', { answer });
-
-      if (wasExploring && originalTask) {
-        // Exploration finished - now run the original task
-        console.log(`\n[CLI] Exploration completed for ${session!.domain}`);
-        console.log(`[CLI] Now executing original task: ${originalTask}`);
-
-        addTraceEntry(sessionId, 'explorer_agent', 'explorer_agent:complete',
-          `Exploration finished, continuing with original task`);
-
-        writeSessionStatus(sessionId, {
-          status: 'running',
-          agent_phase: 'browser_agent',
-          exploring: false,
-        });
-
-        // Send follow-up message to continue with original task
-        connection.send({
-          type: 'mcp_send_message',
-          sessionId,
-          message: `Great, now that you've explored the site, please complete the original task: ${originalTask}`,
-        }).catch(err => console.error('[CLI] Failed to send follow-up:', err));
-
-        appendSessionLog(sessionId, `[EXPLORATION COMPLETE] Now executing: ${originalTask}`);
-      } else {
-        // Normal task completion
-        writeSessionStatus(sessionId, {
-          status: 'complete',
-          agent_phase: 'complete',
-          result: data.result || currentStep,
-        });
-        appendSessionLog(sessionId, `[COMPLETE] ${answer}`);
-        console.log(`\n[CLI] Task completed: ${sessionId}`);
-        console.log(answer);
-      }
+    case 'task_complete': {
+      const raw = step || data.result || 'Task completed';
+      const answer = typeof raw === 'object' ? JSON.stringify(raw, null, 2) : String(raw);
+      appendSessionLog(sessionId, `[COMPLETE] ${answer}`);
+      writeSessionStatus(sessionId, { status: 'complete', result: answer });
+      console.log(`\n[CLI] Task completed: ${sessionId}`);
+      console.log(answer);
+      pendingResolve?.();
       break;
+    }
 
     case 'task_error':
-      orchestrator.updateFromBrowserEvent(sessionId, 'error', { error: data.error });
-      writeSessionStatus(sessionId, {
-        status: 'error',
-        agent_phase: 'error',
-        error: data.error,
-      });
       appendSessionLog(sessionId, `[ERROR] ${data.error}`);
+      writeSessionStatus(sessionId, { status: 'error', error: data.error });
       console.error(`\n[CLI] Task error: ${data.error}`);
+      pendingResolve?.();
       break;
   }
 }
 
-/**
- * Send message to relay (wrapper for orchestrator callback)
- */
-async function sendToNative(message: NativeMessage): Promise<void> {
-  await connection.send(message);
-}
+// --- Commands ---
 
-// ============================================================================
-// Commands
-// ============================================================================
-
-/**
- * Start a new browser task
- */
 async function cmdStart(): Promise<void> {
-  // Parse arguments
   const task = args[1];
   if (!task) {
     console.error('Usage: llm-browser start "task description" [--url URL] [--context TEXT]');
@@ -194,11 +106,8 @@ async function cmdStart(): Promise<void> {
   let context: string | undefined;
 
   for (let i = 2; i < args.length; i++) {
-    if (args[i] === '--url' || args[i] === '-u') {
-      url = args[++i];
-    } else if (args[i] === '--context' || args[i] === '-c') {
-      context = args[++i];
-    }
+    if (args[i] === '--url' || args[i] === '-u') url = args[++i];
+    else if (args[i] === '--context' || args[i] === '-c') context = args[++i];
   }
 
   console.log('[CLI] Starting browser task...');
@@ -206,74 +115,45 @@ async function cmdStart(): Promise<void> {
   if (url) console.log(`  URL: ${url}`);
   if (context) console.log(`  Context: ${context.substring(0, 50)}...`);
 
-  // Initialize connection and orchestrator
   await initConnection();
-  initializeLLMClient(sendToNative);
-  orchestrator = getOrchestrator();
 
-  // Set up browser execute callback - bridges orchestrator to native host
-  orchestrator.setBrowserExecuteCallback(async (sessionId, taskText, taskUrl, taskContext, siteKnowledge) => {
-    let fullContext = taskContext || '';
-    if (siteKnowledge) {
-      fullContext = `${fullContext}\n\n--- Site Knowledge ---\n${siteKnowledge}`;
-    }
+  const sessionId = randomUUID().slice(0, 8);
+  activeSessionId = sessionId;
 
-    await connection.send({
-      type: 'mcp_start_task',
-      sessionId,
-      task: taskText,
-      url: taskUrl,
-      context: fullContext.trim() || undefined,
-    });
-  });
-
-  // Start the task
-  const result = await orchestrator.startTask({ task, url, context });
-
-  // Write initial status
-  writeSessionStatus(result.sessionId, {
-    session_id: result.sessionId,
+  writeSessionStatus(sessionId, {
+    session_id: sessionId,
     status: 'running',
     task,
     url,
     context,
-    domain: result.domain,
-    agent_phase: result.exploring ? 'explorer_agent' : 'browser_agent',
-    exploring: result.exploring || false,
   });
 
-  // Add planning trace
-  const session = orchestrator.getSession(result.sessionId);
-  if (session?.executionTrace) {
-    for (const trace of session.executionTrace) {
-      if (trace.type?.startsWith('planning_agent:')) {
-        addTraceEntry(result.sessionId, 'planning_agent', trace.type, trace.description);
-      } else if (trace.type?.startsWith('explorer_agent:')) {
-        addTraceEntry(result.sessionId, 'explorer_agent', trace.type, trace.description);
-      }
-    }
-  }
+  await connection.send({
+    type: 'mcp_start_task',
+    sessionId,
+    task,
+    url,
+    context,
+  });
 
-  console.log(`\n[CLI] Session started: ${result.sessionId}`);
-  console.log(`  Status file: ~/.llm-in-chrome/sessions/${result.sessionId}.json`);
-  console.log(`  Log file: ~/.llm-in-chrome/sessions/${result.sessionId}.log`);
-  console.log(`\nMonitor with:`);
-  console.log(`  llm-browser status ${result.sessionId}`);
-  console.log(`  llm-browser logs ${result.sessionId} --follow`);
+  console.log(`\n[CLI] Session: ${sessionId}`);
+  console.log(`  Status: ~/.llm-in-chrome/sessions/${sessionId}.json`);
+  console.log(`  Logs:   ~/.llm-in-chrome/sessions/${sessionId}.log`);
+  console.log('\nWaiting for completion...\n');
 
-  // Keep running until task completes
-  const checkInterval = setInterval(() => {
-    const status = readSessionStatus(result.sessionId);
-    if (status && (status.status === 'complete' || status.status === 'error')) {
-      clearInterval(checkInterval);
-      setTimeout(() => process.exit(0), 1000);
-    }
-  }, 1000);
+  // Block until task completes
+  await new Promise<void>((resolve) => {
+    pendingResolve = resolve;
+    // Safety timeout
+    setTimeout(() => {
+      console.error('\n[CLI] Task timed out after 5 minutes');
+      resolve();
+    }, 5 * 60 * 1000);
+  });
+
+  setTimeout(() => process.exit(0), 500);
 }
 
-/**
- * Show status of session(s)
- */
 function cmdStatus(): void {
   const sessionId = args[1];
 
@@ -285,35 +165,19 @@ function cmdStatus(): void {
     }
     console.log(JSON.stringify(status, null, 2));
   } else {
-    const sessions = listSessions();
-    if (sessions.length === 0) {
+    const allSessions = listSessions();
+    if (allSessions.length === 0) {
       console.log('No sessions found.');
     } else {
-      console.log(`Found ${sessions.length} session(s):\n`);
-      for (const s of sessions) {
-        const statusEmoji = {
-          starting: '🔄',
-          planning: '🧠',
-          exploring: '🔍',
-          running: '▶️',
-          complete: '✅',
-          error: '❌',
-          stopped: '⏹️',
-        }[s.status] || '❓';
-
-        console.log(`${statusEmoji} ${s.session_id}`);
-        console.log(`   Task: ${s.task.substring(0, 60)}${s.task.length > 60 ? '...' : ''}`);
-        console.log(`   Status: ${s.status} (${s.agent_phase})`);
-        console.log(`   Updated: ${s.updated_at}`);
-        console.log('');
+      console.log(`Found ${allSessions.length} session(s):\n`);
+      for (const s of allSessions) {
+        const taskPreview = s.task ? s.task.substring(0, 55) : '(no task)';
+        console.log(`  ${s.session_id.padEnd(10)} ${s.status.padEnd(10)} ${taskPreview}`);
       }
     }
   }
 }
 
-/**
- * Send message to a session
- */
 async function cmdMessage(): Promise<void> {
   const sessionId = args[1];
   const message = args[2];
@@ -323,31 +187,15 @@ async function cmdMessage(): Promise<void> {
     process.exit(1);
   }
 
-  const status = readSessionStatus(sessionId);
-  if (!status) {
-    console.error(`Session not found: ${sessionId}`);
-    process.exit(1);
-  }
-
   await initConnection();
-
-  await connection.send({
-    type: 'mcp_send_message',
-    sessionId,
-    message,
-  });
-
+  await connection.send({ type: 'mcp_send_message', sessionId, message });
   appendSessionLog(sessionId, `[USER] ${message}`);
   console.log(`Message sent to session ${sessionId}`);
 }
 
-/**
- * Show logs for a session
- */
 function cmdLogs(): void {
   const sessionId = args[1];
   const follow = args.includes('--follow') || args.includes('-f');
-  const lines = 50;
 
   if (!sessionId) {
     console.error('Usage: llm-browser logs <session_id> [--follow]');
@@ -355,22 +203,17 @@ function cmdLogs(): void {
   }
 
   const logPath = getSessionLogPath(sessionId);
-
   if (!existsSync(logPath)) {
     console.error(`Log file not found: ${logPath}`);
     process.exit(1);
   }
 
-  // Print existing content
   const content = readFileSync(logPath, 'utf-8');
-  const allLines = content.split('\n');
-  console.log(allLines.slice(-lines).join('\n'));
+  console.log(content.split('\n').slice(-50).join('\n'));
 
   if (follow) {
     console.log('\n--- Watching for new logs (Ctrl+C to stop) ---\n');
-
     let lastSize = content.length;
-
     const watcher = watch(logPath, () => {
       const newContent = readFileSync(logPath, 'utf-8');
       if (newContent.length > lastSize) {
@@ -378,17 +221,10 @@ function cmdLogs(): void {
         lastSize = newContent.length;
       }
     });
-
-    process.on('SIGINT', () => {
-      watcher.close();
-      process.exit(0);
-    });
+    process.on('SIGINT', () => { watcher.close(); process.exit(0); });
   }
 }
 
-/**
- * Stop a session
- */
 async function cmdStop(): Promise<void> {
   const sessionId = args[1];
   const remove = args.includes('--remove') || args.includes('-r');
@@ -398,48 +234,25 @@ async function cmdStop(): Promise<void> {
     process.exit(1);
   }
 
-  const status = readSessionStatus(sessionId);
-  if (!status) {
-    console.error(`Session not found: ${sessionId}`);
-    process.exit(1);
-  }
-
   await initConnection();
-
-  await connection.send({
-    type: 'mcp_stop_task',
-    sessionId,
-    remove,
-  });
+  await connection.send({ type: 'mcp_stop_task', sessionId, remove });
 
   if (remove) {
     deleteSessionFiles(sessionId);
     console.log(`Session ${sessionId} stopped and removed.`);
   } else {
     writeSessionStatus(sessionId, { status: 'stopped' });
-    console.log(`Session ${sessionId} stopped. Use --remove to delete files.`);
+    console.log(`Session ${sessionId} stopped.`);
   }
 }
 
-/**
- * Take screenshot
- */
 async function cmdScreenshot(): Promise<void> {
   const sessionId = args[1];
-
   await initConnection();
-
-  await connection.send({
-    type: 'mcp_screenshot',
-    sessionId: sessionId || `screenshot-${Date.now()}`,
-  });
-
+  await connection.send({ type: 'mcp_screenshot', sessionId: sessionId || `screenshot-${Date.now()}` });
   console.log('Screenshot requested. Check the browser extension.');
 }
 
-/**
- * Show help
- */
 function cmdHelp(): void {
   console.log(`
 LLM Browser CLI - Browser automation from the command line
@@ -475,36 +288,17 @@ Examples:
 `);
 }
 
-// ============================================================================
-// Main
-// ============================================================================
+// --- Main ---
 
 async function main(): Promise<void> {
   switch (command) {
-    case 'start':
-      await cmdStart();
-      break;
-    case 'status':
-      cmdStatus();
-      break;
-    case 'message':
-      await cmdMessage();
-      break;
-    case 'logs':
-      cmdLogs();
-      break;
-    case 'stop':
-      await cmdStop();
-      break;
-    case 'screenshot':
-      await cmdScreenshot();
-      break;
-    case 'help':
-    case '--help':
-    case '-h':
-    case undefined:
-      cmdHelp();
-      break;
+    case 'start': await cmdStart(); break;
+    case 'status': cmdStatus(); break;
+    case 'message': await cmdMessage(); break;
+    case 'logs': cmdLogs(); break;
+    case 'stop': await cmdStop(); break;
+    case 'screenshot': await cmdScreenshot(); break;
+    case 'help': case '--help': case '-h': case undefined: cmdHelp(); break;
     default:
       console.error(`Unknown command: ${command}`);
       cmdHelp();

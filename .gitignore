@@ -4,6 +4,7 @@ reference/
 *-claude.ts
 
 # Personal/dev documentation
+research/
 LEARNING_ROADMAP.md
 STRUCTURED_LOGGING.md
 *.local.md

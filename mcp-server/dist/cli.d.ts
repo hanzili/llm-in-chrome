@@ -3,7 +3,7 @@
  * LLM Browser CLI
  *
  * Command-line interface for browser automation.
- * Alternative to the MCP server - simpler, direct communication.
+ * Sends tasks to the Chrome extension via WebSocket relay.
  *
  * Usage:
  *   llm-browser start "task" --url https://example.com
