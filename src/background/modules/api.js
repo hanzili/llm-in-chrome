@@ -199,10 +199,13 @@ export async function callLLMSimple(promptOrOptions, maxTokensArg = 800) {
   }
 
   // Determine which model to use
-  // Priority: modelTier override > user's configured model
+  // This function always routes through the Anthropic API (via native host),
+  // so we must use a Claude model. If the user configured a non-Claude model
+  // (e.g., gpt-5.1-codex), fall back to haiku.
+  const isClaudeModel = config.model?.startsWith('claude-');
   const modelToUse = modelTier && MODEL_TIER_MAP[modelTier]
     ? MODEL_TIER_MAP[modelTier]
-    : config.model;
+    : isClaudeModel ? config.model : MODEL_TIER_MAP.fast;
 
   if (modelTier) {
     console.log(`[API] callLLMSimple: Using model tier "${modelTier}" → ${modelToUse}`);
@@ -410,7 +413,6 @@ async function callLLMThroughProxyOnce(messages, onTextChunk = null, log = () =>
 
   const apiPromise = new Promise((resolve, reject) => {
     const port = getNativeHostPort();
-    let settled = false;
 
     // Accumulate streaming response
     let streamResult = {
@@ -629,7 +631,7 @@ export async function callLLMSimpleViaProxyNoTools(messages, maxTokens = 2000) {
  * @param {string} instructions - System instructions (optional, defaults to general assistant)
  * @returns {Promise<Object>} API response in Anthropic-compatible format
  */
-export async function callLLMSimpleViaCodex(messages, maxTokens = 2000, modelTier = 'smart', instructions = null) {
+export async function callLLMSimpleViaCodex(messages, _maxTokens = 2000, modelTier = 'smart', instructions = null) {
   const PROXY_TIMEOUT_MS = 90000; // 90 seconds for Codex (can be slower)
 
   // Map model tier to Codex model
@@ -858,8 +860,8 @@ export async function callLLM(messages, onTextChunk = null, log = () => {}, curr
   // Always use getToolsForUrl to ensure _domains property is stripped (API rejects unknown properties)
   const tools = getToolsForUrl(currentUrl);
 
-  // Build provider-specific request body and URL
-  const requestBody = provider.buildRequestBody(messages, systemPrompt, tools, useStreaming);
+  // Get URL for early routing checks (OAuth proxy, Codex fallback)
+  // Full request body is built later after potential config changes
   const apiUrl = provider.buildUrl(useStreaming);
 
   // If calling Anthropic API directly with OAuth, use native host proxy (bypasses CORS)

@@ -31,6 +31,11 @@ const mcpSessions = new Map();
 const pendingGetInfoRequests = new Map();
 let getInfoRequestCounter = 0;
 
+// Pending escalation requests (waiting for planning agent guidance)
+// Map<requestId, { resolve: Function, timeout: NodeJS.Timeout }>
+const pendingEscalateRequests = new Map();
+let escalateRequestCounter = 0;
+
 // Callbacks for MCP events
 let onStartTask = null;
 let onSendMessage = null;
@@ -136,7 +141,7 @@ export function connectToRelay() {
       }, WS_RECONNECT_DELAY_MS);
     };
 
-    relaySocket.onerror = (err) => {
+    relaySocket.onerror = (_err) => {
       console.log('[MCP Bridge] WebSocket error (relay may not be running)');
       // onclose will fire after this, handling fallback
     };
@@ -169,6 +174,7 @@ function normalizeIncomingMessage(message) {
     'mcp_stop_task': 'stop_task',
     'mcp_screenshot': 'screenshot',
     'mcp_get_info_response': 'get_info_response',
+    'mcp_escalate_response': 'escalate_response',
     'mcp_poll_results': null, // Not applicable over WebSocket (push-based)
     'llm_request': 'llm_request',
   };
@@ -297,7 +303,7 @@ async function handleMcpCommand(command) {
       }
       break;
 
-    case 'get_info_response':
+    case 'get_info_response': {
       // Response from MCP server for a get_info request
       const pending = pendingGetInfoRequests.get(command.requestId);
       if (pending) {
@@ -309,6 +315,21 @@ async function handleMcpCommand(command) {
         debugLog('get_info response for unknown request', command.requestId);
       }
       break;
+    }
+
+    case 'escalate_response': {
+      // Response from planning agent for an escalation request
+      const pendingEsc = pendingEscalateRequests.get(command.requestId);
+      if (pendingEsc) {
+        clearTimeout(pendingEsc.timeout);
+        pendingEsc.resolve(command.response);
+        pendingEscalateRequests.delete(command.requestId);
+        debugLog('escalate response received', { requestId: command.requestId, response: command.response?.substring?.(0, 100) });
+      } else {
+        debugLog('escalate response for unknown request', command.requestId);
+      }
+      break;
+    }
 
     case 'llm_request':
       // MCP server requesting LLM completion
@@ -433,6 +454,41 @@ export function queryMemory(sessionId, query, timeoutMs = 10000) {
   });
 }
 
+/**
+ * Send escalation to MCP server (planning agent) for mid-task guidance.
+ * Follows the same Promise-bridge pattern as queryMemory().
+ *
+ * @param {string} sessionId - Session ID
+ * @param {string} problem - What the browser agent is stuck on
+ * @param {string} whatITried - Approaches already attempted
+ * @param {string} whatINeed - What would unblock the agent
+ * @param {number} timeoutMs - Timeout (default 3 minutes — accounts for planning LLM call + possible user input)
+ * @returns {Promise<string>} Guidance from planning agent
+ */
+export function sendEscalation(sessionId, problem, whatITried, whatINeed, timeoutMs = 180000) {
+  return new Promise((resolve) => {
+    const requestId = `escalate_${Date.now()}_${++escalateRequestCounter}`;
+
+    const timeout = setTimeout(() => {
+      pendingEscalateRequests.delete(requestId);
+      resolve('Escalation timed out. Continue with your best judgment or try a different approach.');
+    }, timeoutMs);
+
+    pendingEscalateRequests.set(requestId, { resolve, timeout });
+
+    sendToNativeHost({
+      type: 'mcp_escalate',
+      sessionId,
+      requestId,
+      problem,
+      whatITried: whatITried || '',
+      whatINeed,
+    });
+
+    debugLog('escalate request sent', { sessionId, problem, requestId });
+  });
+}
+
 // Model tier → Anthropic model ID mapping for ccproxy
 const CCPROXY_MODEL_MAP = {
   fast: 'claude-haiku-4-5-20251001',
@@ -550,6 +606,7 @@ function normalizeOutgoingMessage(message) {
     'mcp_task_error': 'task_error',
     'mcp_screenshot_result': 'screenshot',
     'mcp_get_info': 'mcp_get_info',
+    'mcp_escalate': 'mcp_escalate',
     'mcp_llm_response': 'llm_response',
   };
 

@@ -16,12 +16,12 @@ import {
 
 // Our implementations (tabs, monitoring, agent tools)
 import { handleFileUpload } from './form-tool.js';
+import { handleUploadImage as handleViewScreenshot } from './utility-tool.js';
 import {
   handleTabsContext,
   handleTabsCreate,
   handleTabsClose,
 } from './tabs-tool.js';
-import { handleUploadImage } from './utility-tool.js';
 import {
   handleReadConsoleMessages,
   handleReadNetworkRequests,
@@ -32,6 +32,7 @@ import {
   handleSolveCaptcha,
   handleResizeWindow,
   handleGetInfo,
+  handleEscalate,
 } from './agent-tool.js';
 
 /**
@@ -50,7 +51,7 @@ export const toolHandlers = {
   tabs_close: handleTabsClose,
   get_page_text: handleGetPageText,
   javascript_tool: handleJavascriptTool,
-  upload_image: handleUploadImage,
+  view_screenshot: handleViewScreenshot,
   read_console_messages: handleReadConsoleMessages,
   read_network_requests: handleReadNetworkRequests,
   update_plan: handleUpdatePlan,
@@ -58,6 +59,7 @@ export const toolHandlers = {
   solve_captcha: handleSolveCaptcha,
   resize_window: handleResizeWindow,
   get_info: handleGetInfo,
+  escalate: handleEscalate,
 };
 
 /**

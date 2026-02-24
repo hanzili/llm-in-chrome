@@ -28,11 +28,11 @@ export class CodexProvider extends BaseProvider {
     };
   }
 
-  buildUrl(useStreaming) {
+  buildUrl(_useStreaming) {
     return CODEX_API_URL;
   }
 
-  buildRequestBody(messages, systemPrompt, tools, useStreaming) {
+  buildRequestBody(messages, systemPrompt, tools, _useStreaming) {
     // Extract text from systemPrompt array (Anthropic format)
     const systemText = Array.isArray(systemPrompt)
       ? systemPrompt.map(p => p.text).join('\n\n')

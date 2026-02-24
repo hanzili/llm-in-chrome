@@ -5,6 +5,101 @@
 
 import { ensureDebugger, sendDebuggerCommand } from '../managers/debugger-manager.js';
 
+const NATIVE_HOST_NAME = 'com.llm_in_chrome.oauth_host';
+
+/**
+ * Check if a file exists on disk via native messaging bridge.
+ * CDP virtualizes file references, so FileReader can't detect missing files.
+ * The native host (Node.js) uses fs.existsSync for a reliable check.
+ * @param {string} filePath - Absolute file path to check
+ * @returns {Promise<boolean>} True if file exists
+ */
+async function checkFileExists(filePath) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendNativeMessage(
+        NATIVE_HOST_NAME,
+        { type: 'check_file', filePath },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            // Native host unavailable — can't verify, allow attempt
+            resolve(true);
+            return;
+          }
+          resolve(response?.exists ?? false);
+        }
+      );
+    } catch (e) {
+      // Native messaging not available — allow attempt
+      resolve(true);
+    }
+  });
+}
+
+// Cached downloads folder path (detected lazily from chrome.downloads history)
+let _downloadsFolder = null;
+
+/**
+ * Detect the user's downloads folder from chrome.downloads history.
+ * Looks for a past download from our extension (browser-agent/ subfolder)
+ * and extracts the base downloads directory from the full path.
+ * @returns {Promise<string|null>} Downloads folder path or null if undetectable
+ */
+async function getDownloadsFolder() {
+  if (_downloadsFolder) return _downloadsFolder;
+
+  try {
+    // Check if we have a stored value
+    const stored = await chrome.storage.local.get('downloadsFolder');
+    if (stored.downloadsFolder) {
+      _downloadsFolder = stored.downloadsFolder;
+      return _downloadsFolder;
+    }
+
+    // Detect from a past download made by our extension
+    const [item] = await chrome.downloads.search({
+      filenameRegex: 'browser-agent',
+      limit: 1,
+      orderBy: ['-startTime'],
+    });
+
+    if (item?.filename) {
+      const idx = item.filename.indexOf('browser-agent');
+      if (idx > 0) {
+        _downloadsFolder = item.filename.substring(0, idx);
+        await chrome.storage.local.set({ downloadsFolder: _downloadsFolder });
+        return _downloadsFolder;
+      }
+    }
+  } catch (e) {
+    // Silent fail — will use filePath as-is
+  }
+
+  return null;
+}
+
+/**
+ * Resolve a file path — if it's just a filename (no directory separators),
+ * resolve it against the downloads folder.
+ * @param {string} input - File path or bare filename
+ * @returns {Promise<string>} Resolved absolute file path
+ */
+async function resolveFilePath(input) {
+  // If it already looks like an absolute or relative path, use as-is
+  if (input.includes('/') || input.includes('\\')) {
+    return input;
+  }
+
+  // Bare filename — resolve against downloads folder
+  const downloadsDir = await getDownloadsFolder();
+  if (downloadsDir) {
+    return downloadsDir + input;
+  }
+
+  // Can't resolve — return as-is and let CDP handle (will fail validation)
+  return input;
+}
+
 /**
  * @typedef {Object} FormToolDeps
  * @property {Function} sendToContent - Send message to content script
@@ -48,15 +143,21 @@ export async function handleFormInput(toolInput, deps) {
 export async function handleFileUpload(toolInput, deps) {
   const { tabId, ref, selector } = toolInput;
   // Support both filePath and file_path (LLM might use either)
-  const filePath = toolInput.filePath || toolInput.file_path;
+  const rawFilePath = toolInput.filePath || toolInput.file_path;
   const log = deps?.log || console.log;
 
   // Validate inputs
   if (!ref && !selector) {
     return 'Error: Either ref or selector is required to identify the file input element';
   }
-  if (!filePath) {
-    return 'Error: filePath is required (absolute path to the file)';
+  if (!rawFilePath) {
+    return 'Error: filePath is required (file name or absolute path to the file)';
+  }
+
+  // Resolve bare filenames against the downloads folder
+  const filePath = await resolveFilePath(rawFilePath);
+  if (filePath !== rawFilePath) {
+    await log?.('FILE_UPLOAD', `Resolved "${rawFilePath}" → "${filePath}"`);
   }
 
   try {
@@ -136,28 +237,37 @@ export async function handleFileUpload(toolInput, deps) {
       // Continue with original node
     }
 
+    // Verify file exists on disk before setting it.
+    // CDP silently accepts nonexistent paths and even FileReader passes
+    // (Chrome virtualizes the file reference). Only the native host can reliably check.
+    const fileExists = await checkFileExists(filePath);
+    if (!fileExists) {
+      return `Error: File "${filePath}" does not exist or is not readable. Check the path and try again.`;
+    }
+
     // Set files on the input using CDP
     await sendDebuggerCommand(tabId, 'DOM.setFileInputFiles', {
       nodeId: fileInputNodeId,
       files: [filePath]
     });
 
-    // Trigger change event via JavaScript to notify the page
-    const triggerSelector = ref ?
-      `[data-llm-ref="${ref}"], [data-ref="${ref}"], #${ref}` :
-      selectorToUse;
-
-    await sendDebuggerCommand(tabId, 'Runtime.evaluate', {
-      expression: `
-        (function() {
-          const input = document.querySelector('${triggerSelector}');
-          if (input) {
-            input.dispatchEvent(new Event('change', { bubbles: true }));
-            input.dispatchEvent(new Event('input', { bubbles: true }));
+    // Trigger change event via the resolved node
+    try {
+      const { object: triggerObj } = await sendDebuggerCommand(tabId, 'DOM.resolveNode', {
+        nodeId: fileInputNodeId,
+      });
+      await sendDebuggerCommand(tabId, 'Runtime.callFunctionOn', {
+        objectId: triggerObj.objectId,
+        functionDeclaration: `
+          function() {
+            this.dispatchEvent(new Event('change', { bubbles: true }));
+            this.dispatchEvent(new Event('input', { bubbles: true }));
           }
-        })()
-      `
-    });
+        `,
+      });
+    } catch (triggerErr) {
+      await log?.('FILE_UPLOAD', `Event trigger failed (non-fatal): ${triggerErr.message}`);
+    }
 
     const uploadedFileName = filePath.split('/').pop();
     return `Successfully uploaded "${uploadedFileName}" to file input`;

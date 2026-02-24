@@ -34,7 +34,7 @@ export class AnthropicProvider extends BaseProvider {
     return headers;
   }
 
-  buildUrl(useStreaming) {
+  buildUrl(_useStreaming) {
     return this.config.apiBaseUrl;
   }
 

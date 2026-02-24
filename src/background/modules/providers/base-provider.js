@@ -29,7 +29,7 @@ export class BaseProvider {
    * @param {boolean} useStreaming - Whether to use streaming endpoint
    * @returns {string} Complete API URL
    */
-  buildUrl(useStreaming) {
+  buildUrl(_useStreaming) {
     throw new Error('Provider must implement buildUrl()');
   }
 
@@ -41,7 +41,7 @@ export class BaseProvider {
    * @param {boolean} useStreaming - Whether to request streaming
    * @returns {Object} Provider-specific request body
    */
-  buildRequestBody(messages, systemPrompt, tools, useStreaming) {
+  buildRequestBody(_messages, _systemPrompt, _tools, _useStreaming) {
     throw new Error('Provider must implement buildRequestBody()');
   }
 
@@ -50,7 +50,7 @@ export class BaseProvider {
    * @param {Object} response - Raw provider response
    * @returns {Object} Normalized response with {content, stop_reason, usage}
    */
-  normalizeResponse(response) {
+  normalizeResponse(_response) {
     throw new Error('Provider must implement normalizeResponse()');
   }
 
@@ -61,7 +61,7 @@ export class BaseProvider {
    * @param {Function} log - Logging function
    * @returns {Promise<Object>} Normalized response
    */
-  async handleStreaming(response, onTextChunk, log) {
+  async handleStreaming(_response, _onTextChunk, _log) {
     throw new Error('Provider must implement handleStreaming()');
   }
 
@@ -70,7 +70,7 @@ export class BaseProvider {
    * @param {string} baseUrl - API base URL
    * @returns {boolean}
    */
-  static matchesUrl(baseUrl) {
+  static matchesUrl(_baseUrl) {
     throw new Error('Provider must implement static matchesUrl()');
   }
 }

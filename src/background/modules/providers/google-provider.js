@@ -37,7 +37,7 @@ export class GoogleProvider extends BaseProvider {
     return url;
   }
 
-  buildRequestBody(messages, systemPrompt, tools, useStreaming) {
+  buildRequestBody(messages, systemPrompt, tools, _useStreaming) {
     // Extract text from systemPrompt array
     const systemText = Array.isArray(systemPrompt)
       ? systemPrompt.map(p => p.text).join('\n\n')

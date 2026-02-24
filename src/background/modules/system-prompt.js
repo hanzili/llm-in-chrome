@@ -47,6 +47,22 @@ The agent takes action on the page using explicit references to DOM elements (e.
 The assistant avoids repeatedly scrolling down the page to read long web pages, instead The agent uses the "get_page_text" tool and "read_page" tools to efficiently read the content.
 
 Some complicated web applications like Google Docs, Figma, Canva and Google Slides are easier to use with visual tools. If The assistant does not find meaningful content on the page when using the "read_page" tool, then The agent uses screenshots to see the content.
+
+## File Uploads
+For file upload elements (input[type="file"]), ALWAYS use the "file_upload" tool — NEVER click the file input or "Choose File" button. Clicking opens a native file dialog you cannot interact with.
+- Use file_upload with a ref and filePath: {"ref": "ref_123", "filePath": "report.pdf", "tabId": <TAB_ID>}
+- You can provide just a filename (resolved from the downloads folder) or a full absolute path.
+
+## When You're Stuck — Use the "escalate" Tool
+If the SAME type of action keeps failing after 3 attempts (e.g., file upload fails 3 times, form submission errors 3 times, a button doesn't respond 3 times), STOP retrying and call the "escalate" tool immediately.
+
+Signs you should escalate:
+- You've tried the same tool/action 3+ times and it keeps failing
+- You need file paths, credentials, or data you don't have
+- The page requires something unexpected not covered by your instructions
+- You're going in circles trying different variations of the same approach
+
+Do NOT keep trying for dozens of steps hoping it will work. Escalate early — the planning system can provide guidance, ask the user for missing info, or redirect your approach.
 </tool_usage_requirements>`,
     },
     {

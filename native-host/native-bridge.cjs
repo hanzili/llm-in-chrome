@@ -487,6 +487,15 @@ function handleMessage(msg) {
       // No response needed - fire and forget
       break;
 
+    case 'check_file':
+      try {
+        const exists = fs.existsSync(msg.filePath);
+        send({ type: 'file_check_result', exists, filePath: msg.filePath });
+      } catch (e) {
+        send({ type: 'file_check_result', exists: false, filePath: msg.filePath, error: e.message });
+      }
+      break;
+
     case 'read_cli_credentials':
       const claudeCreds = getClaudeCredentials();
       if (claudeCreds) {

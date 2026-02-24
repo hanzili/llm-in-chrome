@@ -124,16 +124,16 @@ export async function handleJavascriptTool(toolInput, deps) {
 }
 
 /**
- * Handle upload_image tool - send screenshot to LLM
+ * Handle view_screenshot tool - return a previously captured screenshot to the LLM
  * @param {Object} toolInput - Tool input parameters
- * @param {string} toolInput.image_id - ID of captured screenshot
+ * @param {string} toolInput.imageId - ID of captured screenshot
  * @param {UtilityToolDeps} deps - Dependency injection object
- * @returns {Promise<Object>} Image upload result with base64 data
+ * @returns {Promise<Object>} Image result with base64 data
  */
 export async function handleUploadImage(toolInput, deps) {
   const { capturedScreenshots } = deps;
 
-  const imageId = toolInput.image_id;
+  const imageId = toolInput.imageId || toolInput.image_id;
   const dataUrl = capturedScreenshots.get(imageId);
 
   if (!dataUrl) {

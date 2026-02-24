@@ -182,8 +182,8 @@ const OVERHEAD_TOKENS = 6500;
 // - Response generation (max_tokens, typically 10K)
 // - Overhead (system prompt, tools)
 // - Safety margin for tokenization variance
-// Real usable limit: 200K - 10K (response) - 6.5K (overhead) - 10K (safety) = ~173K
-const COMPACTION_THRESHOLD = 150000;  // Aggressive threshold to avoid hitting limits
+// Real usable limit: 200K - 10K (response) - 6.5K (overhead) = ~183.5K
+const COMPACTION_THRESHOLD = 170000;
 
 /**
  * Estimate tokens for text content

@@ -287,38 +287,6 @@ export const TOOL_DEFINITIONS = [
   },
 
   {
-    name: 'upload_image',
-    description: `Upload a previously captured screenshot or user-uploaded image to a file input or drag & drop target. Supports two approaches: (1) ref - for targeting specific elements, especially hidden file inputs, (2) coordinate - for drag & drop to visible locations like Google Docs. Provide either ref or coordinate, not both.`,
-    input_schema: {
-      type: 'object',
-      properties: {
-        imageId: {
-          type: 'string',
-          description: "ID of a previously captured screenshot (from the computer tool's screenshot action) or a user-uploaded image",
-        },
-        ref: {
-          type: 'string',
-          description: 'Element reference ID from read_page or find tools (e.g., "ref_1", "ref_2"). Use this for file inputs (especially hidden ones) or specific elements. Provide either ref or coordinate, not both.',
-        },
-        coordinate: {
-          type: 'array',
-          items: { type: 'number' },
-          description: 'Viewport coordinates [x, y] for drag & drop to a visible location. Use this for drag & drop targets like Google Docs. Provide either ref or coordinate, not both.',
-        },
-        tabId: {
-          type: 'number',
-          description: 'Tab ID where the target element is located. This is where the image will be uploaded to.',
-        },
-        filename: {
-          type: 'string',
-          description: 'Optional filename for the uploaded file (default: "image.png")',
-        },
-      },
-      required: ['imageId', 'tabId'],
-    },
-  },
-
-  {
     name: 'read_console_messages',
     description: `Read browser console messages (console.log, console.error, console.warn, etc.) from a specific tab. Useful for debugging JavaScript errors, viewing application logs, or understanding what's happening in the browser console. Returns console messages from the current domain only. If you don't have a valid tab ID, use tabs_context first to get available tabs. IMPORTANT: Always provide a pattern to filter messages - without a pattern, you may get too many irrelevant messages.`,
     input_schema: {
@@ -451,8 +419,23 @@ export const TOOL_DEFINITIONS = [
   },
 
   {
+    name: 'view_screenshot',
+    description: `View a previously captured screenshot. Use this when you need to re-examine a screenshot you took earlier (e.g., after many steps, to recall what you saw). Returns the image so you can see it. Does NOT upload anything to a webpage — use file_upload for that.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        imageId: {
+          type: 'string',
+          description: 'ID of a previously captured screenshot (e.g., "screenshot_1"). Get this from the computer tool\'s screenshot action.',
+        },
+      },
+      required: ['imageId'],
+    },
+  },
+
+  {
     name: 'file_upload',
-    description: `Upload a file to a file input element on the page. Provide a local file path and either a ref or CSS selector to identify the file input. Works with hidden file inputs and custom upload buttons.`,
+    description: `Upload a file to a file input element on the page. You can provide just the filename (e.g., "report.pdf") and it will be resolved from the downloads folder, or provide a full absolute path. Provide either a ref or CSS selector to identify the file input. Works with hidden file inputs and custom upload buttons.`,
     input_schema: {
       type: 'object',
       properties: {
@@ -466,7 +449,7 @@ export const TOOL_DEFINITIONS = [
         },
         filePath: {
           type: 'string',
-          description: 'Absolute path to the file (e.g., "/Users/name/Documents/resume.pdf").',
+          description: 'Filename (e.g., "resume.pdf") resolved from downloads folder, or absolute path (e.g., "/Users/name/Documents/resume.pdf"). Prefer just the filename.',
         },
         tabId: {
           type: 'number',
@@ -508,6 +491,37 @@ If get_info returns "not found":
         },
       },
       required: ['query'],
+    },
+  },
+
+  {
+    name: 'escalate',
+    description: `Report a blocker to get guidance from the planning system.
+
+Use this ONLY when you are genuinely STUCK and cannot proceed:
+- A required field needs information you don't have (file paths, credentials, specific data)
+- An element keeps failing after 2-3 attempts with different approaches
+- The page requires something unexpected that wasn't in your instructions
+
+Do NOT use for normal progress or minor UI quirks you can work around.
+The response will contain specific guidance on how to proceed.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        problem: {
+          type: 'string',
+          description: 'What specific problem are you stuck on? Be precise about what element/field/action is failing.',
+        },
+        what_i_tried: {
+          type: 'string',
+          description: 'What approaches have you already attempted?',
+        },
+        what_i_need: {
+          type: 'string',
+          description: 'What specific information or guidance would unblock you?',
+        },
+      },
+      required: ['problem', 'what_i_need'],
     },
   },
 ];

@@ -206,6 +206,35 @@ export async function handleResizeWindow(toolInput) {
 }
 
 /**
+ * Handle escalate tool - report a blocker to the planning system for guidance
+ *
+ * @param {Object} toolInput - Tool input parameters
+ * @param {string} toolInput.problem - What the browser agent is stuck on
+ * @param {string} [toolInput.what_i_tried] - Approaches already attempted
+ * @param {string} toolInput.what_i_need - What would unblock the agent
+ * @param {Object} deps - Dependency injection object
+ * @param {Function} [deps.sendEscalation] - Function to send escalation via MCP bridge
+ * @param {string} [deps.sessionId] - MCP session ID
+ * @returns {Promise<string>} Guidance from the planning system
+ */
+export async function handleEscalate(toolInput, deps) {
+  const { sendEscalation, sessionId } = deps;
+
+  if (!sessionId || !sendEscalation) {
+    return 'Escalation not available. Try a different approach on your own.';
+  }
+
+  const response = await sendEscalation(
+    sessionId,
+    toolInput.problem,
+    toolInput.what_i_tried,
+    toolInput.what_i_need,
+  );
+
+  return typeof response === 'string' ? response : JSON.stringify(response);
+}
+
+/**
  * Handle get_info tool - retrieve information from Mem0 semantic memory
  *
  * This tool queries Mem0 for semantically relevant information based on

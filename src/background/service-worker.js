@@ -14,18 +14,18 @@ import {
   createAbortController, abortRequest,
   callLLM, callLLMSimple, resetApiCallCounter, getApiCallCount, isClaudeProvider
 } from './modules/api.js';
-import { manageMemory, getMemoryStats } from './modules/memory-manager.js';
+import { getMemoryStats } from './modules/memory-manager.js';
 import { compactIfNeeded, calculateContextTokens } from './modules/conversation-compaction.js';
 import { startOAuthLogin, importCLICredentials, logout, getAuthStatus } from './modules/oauth-manager.js';
 import { importCodexCredentials, logoutCodex, getCodexAuthStatus } from './modules/codex-oauth-manager.js';
 import { hasHandler, executeToolHandler } from './tool-handlers/index.js';
 import { log, clearLog, saveTaskLogs, initLogging } from './managers/logging-manager.js';
 import { startSession, resetTaskUsage, recordApiCall, recordTaskCompletion, getTaskUsage } from './managers/usage-tracker.js';
-import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking, setPopupCallbacks, getPopupOpener, isTrackedPopup } from './managers/debugger-manager.js';
+import { ensureDebugger, detachDebugger, sendDebuggerCommand, initDebugger, isNetworkTrackingEnabled, enableNetworkTracking, setPopupCallbacks } from './managers/debugger-manager.js';
 import { showAgentIndicators, hideAgentIndicators, hideIndicatorsForToolUse, showIndicatorsAfterToolUse } from './managers/indicator-manager.js';
 import { ensureTabGroup, addTabToGroup, validateTabInGroup, isTabManagedByAgent, registerTabCleanupListener, initTabManager } from './managers/tab-manager.js';
 import {
-  initMcpBridge, startMcpPolling, sendMcpUpdate, sendMcpComplete, sendMcpError, sendMcpScreenshot, isMcpSession, queryMemory
+  initMcpBridge, startMcpPolling, sendMcpUpdate, sendMcpComplete, sendMcpError, sendMcpScreenshot, queryMemory, sendEscalation
 } from './modules/mcp-bridge.js';
 
 // ============================================
@@ -51,9 +51,8 @@ let currentTask = null;
 let taskCancelled = false;
 let conversationHistory = []; // Persists across tasks in the same chat session
 
-// Screenshot storage for upload_image
+// Screenshot storage for computer tool screenshots
 let capturedScreenshots = new Map();
-let screenshotCounter = { value: 0 };
 let taskScreenshots = []; // Screenshots collected during task for logging
 
 // Screenshot context tracking
@@ -357,7 +356,7 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null, mcpSes
   // Validate tab is in our group (for tools that use tabId)
   // Skip URL validation for navigate tool since it changes the URL anyway
   const tabTools = ['computer', 'read_page', 'find', 'form_input', 'get_page_text',
-                    'javascript_tool', 'upload_image', 'read_console_messages', 'read_network_requests', 'resize_window', 'solve_captcha'];
+                    'javascript_tool', 'file_upload', 'read_console_messages', 'read_network_requests', 'resize_window', 'solve_captcha'];
   if (tabId && tabTools.includes(toolName)) {
     const validation = await validateTabInGroup(tabId, sessionTabGroupId);
     if (!validation.valid) {
@@ -386,7 +385,6 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null, mcpSes
       sendToContent,
       hideIndicatorsForToolUse,
       showIndicatorsAfterToolUse,
-      screenshotCounter,
       capturedScreenshots,
       screenshotContexts,
       taskScreenshots,
@@ -406,6 +404,8 @@ async function executeTool(toolName, toolInput, sessionTabGroupId = null, mcpSes
       setPendingPlanResolve: (resolver) => { pendingPlanResolve = resolver; },
       mcpSession,  // For get_info tool to access task context
       queryMemory, // For get_info tool to query Mem0 via MCP server
+      sendEscalation, // For escalate tool to send escalation via MCP bridge
+      sessionId: mcpSession?.sessionId, // For escalate tool to identify the session
     };
     return await executeToolHandler(toolName, toolInput, deps);
   }
@@ -668,6 +668,11 @@ ${mcpSession.context}</system-reminder>`,
           mcpSession.screenshots.push(dataUrl);
         } else {
           taskScreenshots.push(dataUrl);
+        }
+
+        // Store in capturedScreenshots map so view_screenshot tool can retrieve it
+        if (result.imageId) {
+          capturedScreenshots.set(result.imageId, dataUrl);
         }
 
         // Include the actual output message if present (e.g., "Scrolled down by 5 ticks at (x, y)")
@@ -1242,16 +1247,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
       steps: currentTask.steps.length
     });
 
-    // Clean up task window (each task gets its own window)
-    if (session.windowId) {
-      try {
-        await chrome.windows.remove(session.windowId);
-        console.log(`[MCP] Closed task window ${session.windowId} for session ${sessionId}`);
-      } catch (e) {
-        // Window may have been closed manually by user
-        console.log(`[MCP] Window ${session.windowId} already closed`);
-      }
-    }
+    // Leave task window open so user can review the result
 
   } catch (error) {
     await detachDebugger(tabId);  // Only detach this tab (parallel execution)
@@ -1293,16 +1289,7 @@ async function startMcpTaskInternal(sessionId, tabId, task) {
       sendMcpError(sessionId, error.message);
     }
 
-    // Clean up task window on error/cancel
-    if (session.windowId) {
-      try {
-        await chrome.windows.remove(session.windowId);
-        console.log(`[MCP] Closed task window ${session.windowId} for session ${sessionId}`);
-      } catch (e) {
-        // Window may have been closed manually by user
-        console.log(`[MCP] Window ${session.windowId} already closed`);
-      }
-    }
+    // Leave task window open so user can review the error state
   }
 }
 
