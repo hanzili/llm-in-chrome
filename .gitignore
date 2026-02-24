@@ -53,6 +53,13 @@ SPEC-dual-mode.md
 
 # Claude Code
 .claude/
+.agents/
+
+# AI editor configs
+.factory/
+.windsurf/
+skills/
+skills-lock.json
 
 # Internal documentation (not for public release)
 docs/internal/

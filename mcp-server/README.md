@@ -1,105 +1,16 @@
-# LLM in Chrome MCP Server
+# LLM in Chrome — MCP Server
 
-Give Claude Code a browser agent that handles web tasks autonomously.
+The MCP server that connects your AI tool to the Chrome extension. Install this to give Claude Code, Cursor, Windsurf, or any MCP client browser capabilities.
 
-## Why This Exists
+## Setup
 
-When you need to interact with the web, you have two options:
-
-### 1. Low-Level Browser Tools (Playwright MCP, browser-use, etc.)
-```
-Claude: I'll click the login button
-Claude: Now I'll type the username
-Claude: Now I'll click submit
-Claude: The page changed, let me screenshot
-Claude: I see an error, let me try again
-... 50 more tool calls ...
-```
-
-Every click, every keystroke, every navigation is a separate tool call. You're doing the browsing yourself.
-
-### 2. This MCP Server (High-Level Agent)
-```
-Claude: browser_start("Log into my account and download the invoice")
-Claude: browser_status → { status: "running", step: "Filling login form..." }
-Claude: browser_status → { status: "complete", result: "Downloaded invoice.pdf" }
-```
-
-You delegate the entire task. The agent handles all browser interaction.
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `browser_start` | Start a new task. Returns session_id for tracking. |
-| `browser_message` | Send follow-up instructions to a running task. |
-| `browser_status` | Check progress. Works for single task or all tasks. |
-| `browser_stop` | Stop a task and get partial results. |
-| `browser_screenshot` | Capture current browser state. |
-
-## Parallel Execution
-
-Run multiple tasks simultaneously:
-
-```
-session1 = browser_start("Search for flights to Tokyo")
-session2 = browser_start("Check hotel prices in Shibuya")
-session3 = browser_start("Look up JR Pass costs")
-
-# All three run in parallel
-browser_status() → Shows all 3 active sessions
-```
-
-## Multi-Turn Interaction
-
-Send follow-up messages to guide the agent:
-
-```
-session = browser_start("Fill out the job application")
-
-# Agent might need clarification
-browser_status(session) → { status: "waiting", step: "What's your desired salary?" }
-
-browser_message(session, "Put $150k")
-
-browser_status(session) → { status: "running", step: "Completing remaining fields..." }
-```
-
-## Session Continuation
-
-Continue working with completed tasks - the agent retains full memory:
-
-```
-session = browser_start("Go to LinkedIn and find an AI Engineer job in Montreal")
-
-# Wait for completion...
-browser_status(session) → { status: "complete", answer: "Found: Applied AI Engineer at Cohere" }
-
-# Continue with the same session - agent remembers everything
-browser_message(session, "Click into that job and tell me the requirements")
-
-browser_status(session) → { status: "complete", answer: "Requirements: 3+ years Python..." }
-
-# Keep going
-browser_message(session, "Now apply to this job using my profile")
-```
-
-Each session has isolated memory, so parallel tasks don't interfere with each other.
-
-## Installation
-
-### 1. Install the Chrome Extension
-The MCP server requires the LLM in Chrome extension to be installed and configured.
-
-### 2. Install the MCP Server
 ```bash
 cd mcp-server
 npm install
 npm run build
 ```
 
-### 3. Configure Claude Code
-Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json`):
+Add to your MCP config (e.g., `~/.claude/claude_desktop_config.json`):
 
 ```json
 {
@@ -112,52 +23,119 @@ Add to your Claude Code MCP config (`~/.claude/claude_desktop_config.json`):
 }
 ```
 
-## Use Cases
+**Prerequisites:** The Chrome extension must be installed and running. See the [main README](../README.md) for full setup.
 
-**Form Filling**
+## Tools
+
+### `browser_start`
+
+Start a browser task. **Blocks until complete** — no polling needed.
+
 ```
-browser_start("Apply for the senior engineer position on careers.example.com using my resume info")
+browser_start(
+  task: "Search for flights to Tokyo on Google Flights",
+  url: "https://flights.google.com",        // optional starting URL
+  context: "Departing March 15, economy"     // optional extra info
+)
+
+→ {
+  "session_id": "abc123",
+  "status": "complete",
+  "task": "Search for flights to Tokyo...",
+  "answer": "Found 3 flights: JAL $850, ANA $920, United $780",
+  "total_steps": 8,
+  "recent_steps": ["Opened Google Flights", "Set destination to Tokyo", ...]
+}
 ```
 
-**Research**
+### `browser_message`
+
+Send follow-up instructions to an existing session. Also blocks until the agent finishes.
+
+```
+browser_message(session_id: "abc123", message: "Book the cheapest one")
+```
+
+### `browser_status`
+
+Check what's running.
+
+```
+browser_status()                    // all active sessions
+browser_status(session_id: "abc123") // specific session
+```
+
+### `browser_stop`
+
+Stop a task.
+
+```
+browser_stop(session_id: "abc123")
+browser_stop(session_id: "abc123", remove: true)  // also delete session
+```
+
+### `browser_screenshot`
+
+Capture the current browser state as an image.
+
+```
+browser_screenshot(session_id: "abc123")
+```
+
+## Examples
+
+**Research:**
 ```
 browser_start("Find the top 3 competitors for Acme Corp and summarize their pricing")
 ```
 
-**Data Extraction**
+**Logged-in workflows:**
 ```
-browser_start("Go to my bank account and list all transactions from last month")
-```
-
-**Multi-Step Workflows**
-```
-browser_start("Log into Jira, find my open tickets, and summarize what needs attention this week")
+browser_start("Go to Jira, find my open tickets, and summarize what needs attention this week")
 ```
 
-## How It Works
+**Multi-turn:**
+```
+s = browser_start("Go to LinkedIn and find AI Engineer jobs in Montreal")
+→ { session_id: "x1", answer: "Found: Applied AI Engineer at Cohere" }
+
+browser_message("x1", "Click into that job and tell me the requirements")
+→ { answer: "Requirements: 3+ years Python, ML experience..." }
+
+browser_message("x1", "Apply to this job using my profile")
+→ { answer: "Application submitted successfully" }
+```
+
+**Parallel execution:**
+```
+browser_start("Check flight prices to Tokyo")
+browser_start("Check hotel prices in Shibuya")
+browser_start("Look up train pass costs")
+// All three run simultaneously
+```
+
+## Configuration
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `LLM_IN_CHROME_MAX_SESSIONS` | `5` | Max concurrent browser tasks |
+| `WS_RELAY_PORT` | `7862` | WebSocket relay port |
+
+## Architecture
 
 ```
-Claude Code → MCP Server → Native Host → Chrome Extension → Browser
-                ↑                              ↓
-                └──────── Status Updates ──────┘
+AI Tool (Claude Code, Cursor, etc.)
+    ↓ MCP Protocol (stdio)
+MCP Server (this)
+    ↓ WebSocket
+Relay Server (localhost:7862)
+    ↓ WebSocket
+Chrome Extension (user's browser)
+    ↓ Browser automation
+Target Website
 ```
 
-1. Claude Code calls `browser_start` with a task
-2. MCP server creates a session and sends to native host
-3. Native host relays to Chrome extension
-4. Extension's agent handles all browser interaction
-5. Status updates flow back through the chain
-6. Claude Code monitors via `browser_status`
-
-## Comparison with Other Tools
-
-| Feature | This Server | Playwright MCP | browser-use |
-|---------|------------|----------------|-------------|
-| Abstraction | Task-level | Action-level | Action-level |
-| Tool calls per task | ~3 | ~50+ | ~50+ |
-| Parallel tasks | ✅ | Manual | Manual |
-| Multi-turn | ✅ | N/A | N/A |
-| Setup | Extension | Playwright | Python deps |
+The relay server starts automatically when the MCP server connects. It routes messages between the MCP server and the Chrome extension, with message queuing for when the extension's service worker is sleeping.
 
 ## License
 

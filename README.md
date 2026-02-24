@@ -1,196 +1,57 @@
 # LLM in Chrome
 
-An autonomous browser agent that lets any LLM control your browser. Multi-provider support (Claude, GPT, Gemini, Mistral, Qwen) with full browser automation capabilities.
+Give your AI agent a browser. Works with Claude Code, Cursor, Windsurf, Codex CLI, and anything that supports MCP.
 
 [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/iklpkemlmbhemkiojndpbhoakgikpmcd)](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)
-
-**[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
 
 ## Demo
 
 [![demo video](https://img.youtube.com/vi/cal0k351Rwo/maxresdefault.jpg)](https://youtu.be/cal0k351Rwo)
 
-Shows the agent applying to jobs, unsubscribing from emails in Gmail, and completing challenges with captchas and anti-bot protections.
+## Why?
 
-## Features
+Other browser tools (Playwright MCP, Browser Use) give your AI a **new, empty browser**. Every click is a separate tool call. Logging in is a nightmare.
 
-- **Browser Automation**: Click, type, scroll, drag, and navigate web pages
-- **Screenshots**: Capture and analyze page content with automatic DPR scaling
-- **Accessibility Tree**: Read page structure for intelligent element interaction
-- **Tab Management**: Create, close, and switch between tabs
-- **Form Handling**: Fill forms and upload files
-- **Console/Network Monitoring**: Track page logs and network requests
-- **Domain Skills**: Built-in best practices for Gmail, Google Docs, GitHub, LinkedIn, and more
-- **Multi-Provider Support**: Works with Anthropic, OpenAI, Google, and OpenRouter
-- **MCP Server**: Integrate with Claude Code for high-level task automation
+This gives your AI **your actual Chrome** — already logged into Gmail, GitHub, Jira, everything. It delegates the entire task to a browser agent that handles all the clicking and typing autonomously.
 
-## Installation
+```
+# Other tools: 50+ tool calls, one click at a time
+ai: click login button
+ai: type username
+ai: type password
+ai: click submit
+ai: wait for page load
+ai: click menu
+... (you get the idea)
 
-### Option 1: Chrome Web Store (Recommended)
-
-1. **[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
-
-2. Install the native host (required for subscription plans):
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
-   ```
-
-### Option 2: Load Unpacked (Development)
-
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/hanzili/llm-in-chrome.git
-   cd llm-in-chrome
-   ```
-
-2. Open Chrome and navigate to `chrome://extensions`
-
-3. Enable "Developer mode" (toggle in top-right corner)
-
-4. Click "Load unpacked" and select the extension directory
-
-5. The extension icon should appear in your toolbar
-
-6. **Install native host** (for Claude Code/Codex plan support):
-   ```bash
-   cd native-host
-   ./install.sh
-   ```
-
-   > **Note:** The install script includes both production (`iklpkemlmbhemkiojndpbhoakgikpmcd`) and a default development extension ID (`dnajlkacmnpfmilkeialficajdgkkkfo`). If your unpacked extension has a different ID (visible in `chrome://extensions`), edit the `DEV_ID` variable in `install.sh` or `native-host/install.sh` before running.
-
-### Prerequisites
-
-- Google Chrome (version 120+)
-- Node.js 18+ (for native host)
-
-### Configuration
-
-You can use either **subscription-based plans** (no API billing) or **API keys** (pay-per-use).
-
-#### Subscription Plans (Recommended)
-
-Use your existing Claude or ChatGPT subscription - no API billing!
-
-### Claude Code Plan Setup
-
-Use your Claude Pro/Max subscription ($20-200/month) instead of paying per API call.
-
-**Prerequisites:**
-- Claude Pro or Max subscription
-- Claude Code CLI installed
-
-**Steps:**
-
-1. **Install Claude Code CLI:**
-   ```bash
-   # macOS/Linux
-   curl -fsSL https://claude.ai/install.sh | sh
-
-   # Or with npm
-   npm install -g @anthropic-ai/claude-code
-   ```
-
-2. **Login to Claude Code:**
-   ```bash
-   claude login
-   ```
-   This opens a browser window to authenticate with your Claude account.
-
-3. **Install Native Host** (required for Chrome extension):
-   ```bash
-   # One-liner install
-   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
-   ```
-
-4. **Connect in Extension:**
-   - Open the extension settings
-   - Click "Connect" under Claude Code Plan
-   - Credentials are auto-detected from macOS Keychain or `~/.claude/credentials.json`
-
-**Models available:** Opus 4.5, Opus 4, Sonnet 4, Haiku 4.5 (labeled as "Claude Code")
-
-### Codex Plan Setup
-
-Use your ChatGPT Pro/Plus subscription ($20-200/month) instead of paying per API call.
-
-**Prerequisites:**
-- ChatGPT Pro or Plus subscription
-- Codex CLI installed
-
-**Steps:**
-
-1. **Install Codex CLI:**
-   ```bash
-   npm install -g @openai/codex
-   ```
-
-2. **Login to Codex:**
-   ```bash
-   codex login
-   ```
-   This opens a browser window to authenticate with your OpenAI/ChatGPT account.
-
-3. **Install Native Host** (required for Chrome extension):
-   ```bash
-   # One-liner install
-   curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
-   ```
-
-4. **Connect in Extension:**
-   - Open the extension settings
-   - Click "Connect" under Codex Plan
-   - The extension will read credentials from `~/.codex/auth.json`
-
-**Models available:** GPT-5.1 Codex Max, GPT-5.2 Codex, GPT-5.1 Codex Mini (labeled as "Codex Plan")
-
-#### API Keys (Pay-per-use)
-
-Alternatively, use API keys for pay-per-use billing:
-
-1. Click the extension icon and open Settings
-2. Enter your API key for your preferred provider:
-   - **Anthropic**: Get key from [console.anthropic.com](https://console.anthropic.com)
-   - **OpenAI**: Get key from [platform.openai.com](https://platform.openai.com)
-   - **Google**: Get key from [aistudio.google.com](https://aistudio.google.com)
-   - **OpenRouter**: Get key from [openrouter.ai](https://openrouter.ai)
-
-## Usage
-
-1. Navigate to any web page
-2. Click the extension icon to open the side panel
-3. Describe what you want to accomplish
-4. The AI agent will autonomously browse and complete your task
-
-### Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `computer` | Mouse/keyboard actions (click, type, scroll, etc.) |
-| `navigate` | Go to URLs, back/forward navigation |
-| `tabs_context` | List available tabs |
-| `tabs_create` | Open new tabs |
-| `tabs_close` | Close tabs |
-| `read_page` | Get accessibility tree representation |
-| `get_page_text` | Extract text content from pages |
-| `form_input` | Fill form fields |
-| `file_upload` | Upload files to file inputs |
-| `javascript_tool` | Execute JavaScript on pages |
-| `read_console_messages` | Get browser console logs |
-| `read_network_requests` | Get network request history |
-
-## MCP Server Integration
-
-Use the browser agent as a tool in Claude Code for high-level task automation.
-
-### Setup
-
-```bash
-cd mcp-server
-npm install && npm run build
+# This: 1 tool call, entire task delegated
+ai: browser_start("Log into Jira and summarize my open tickets")
+ai: → { status: "complete", answer: "You have 3 open tickets..." }
 ```
 
-Add to `~/.claude/claude_desktop_config.json`:
+## Quick Start
+
+### 1. Install the Chrome extension
+
+**[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
+
+### 2. Install the native host
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
+```
+
+### 3. Add the MCP server
+
+```bash
+cd mcp-server && npm install && npm run build
+```
+
+Add to your MCP config:
+
+<details>
+<summary><strong>Claude Code</strong> (~/.claude/claude_desktop_config.json)</summary>
+
 ```json
 {
   "mcpServers": {
@@ -201,27 +62,187 @@ Add to `~/.claude/claude_desktop_config.json`:
   }
 }
 ```
+</details>
 
-### Usage
+<details>
+<summary><strong>Cursor</strong> (.cursor/mcp.json)</summary>
 
+```json
+{
+  "mcpServers": {
+    "browser": {
+      "command": "node",
+      "args": ["/path/to/llm-in-chrome/mcp-server/dist/index.js"]
+    }
+  }
+}
 ```
-# Start a task
+</details>
+
+<details>
+<summary><strong>Windsurf / Other MCP clients</strong></summary>
+
+Point your MCP client to:
+```
+node /path/to/llm-in-chrome/mcp-server/dist/index.js
+```
+</details>
+
+### 4. Set up credentials
+
+The extension needs LLM credentials to power the browser agent. Choose one:
+
+<details>
+<summary><strong>Claude Code subscription</strong> (recommended — no extra cost)</summary>
+
+If you already have Claude Code set up, the extension auto-detects your credentials:
+```bash
+claude login  # if not already logged in
+```
+Open the extension settings and click "Connect" under Claude Code Plan.
+</details>
+
+<details>
+<summary><strong>Codex subscription</strong></summary>
+
+```bash
+npm install -g @openai/codex
+codex login
+```
+Open the extension settings and click "Connect" under Codex Plan.
+</details>
+
+<details>
+<summary><strong>API keys</strong> (pay-per-use)</summary>
+
+Open the extension settings and enter your key for:
+- [Anthropic](https://console.anthropic.com)
+- [OpenAI](https://platform.openai.com)
+- [Google](https://aistudio.google.com)
+- [OpenRouter](https://openrouter.ai)
+</details>
+
+That's it. Your AI can now use your browser.
+
+## What You Can Do
+
+### Web research
+```
+browser_start("Search for 'MCP protocol' on Google and summarize the first 3 results")
+```
+
+### Logged-in tasks
+```
+browser_start("Go to Gmail and unsubscribe from all marketing emails from the last week")
+```
+
+### Form filling
+```
+browser_start(
+  "Apply for the senior engineer position on careers.acme.com",
+  context="Name: Jane Doe, Email: jane@example.com, Experience: 10 years Python..."
+)
+```
+
+### Multi-step workflows
+```
 browser_start("Log into my bank and download last month's statement")
-
-# Check progress
-browser_status(session_id) → { status: "running", steps: [...] }
-
-# Continue after completion
-browser_message(session_id, "Now download the one from two months ago")
 ```
 
-**Features:**
-- **Task-level abstraction**: Delegate entire workflows, not individual clicks
-- **Session continuation**: Send follow-up messages to completed tasks
-- **Parallel execution**: Run multiple tasks simultaneously with isolated memory
-- **Progress monitoring**: Track steps and intervene if needed
+### Follow-up messages
+```
+session = browser_start("Find AI engineer jobs on LinkedIn in San Francisco")
+# → { session_id: "abc123", status: "complete", answer: "Found 5 results..." }
 
-See [mcp-server/README.md](mcp-server/README.md) for full documentation.
+browser_message("abc123", "Apply to the first one using my profile")
+```
+
+### Parallel tasks
+```
+browser_start("Search for flights to Tokyo on Google Flights")
+browser_start("Check hotel prices in Shibuya on Booking.com")
+browser_start("Look up JR Pass costs")
+# All three run simultaneously in separate windows
+```
+
+## MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `browser_start` | Run a task. Blocks until complete, returns the result. |
+| `browser_message` | Send follow-up instructions to an existing session. |
+| `browser_status` | Check progress of active tasks. |
+| `browser_stop` | Stop a task. |
+| `browser_screenshot` | Capture current browser state. |
+
+## CLI
+
+There's also a CLI for running tasks from the terminal:
+
+```bash
+# Start a task (blocks until complete)
+node mcp-server/dist/cli.js start "Search for AI news" --url https://google.com
+
+# Check status
+node mcp-server/dist/cli.js status
+
+# Watch logs in real-time
+node mcp-server/dist/cli.js logs <session_id> --follow
+
+# Send follow-up message
+node mcp-server/dist/cli.js message <session_id> "Click the first result"
+
+# Stop a task
+node mcp-server/dist/cli.js stop <session_id>
+```
+
+## How It Works
+
+```
+Claude Code / Cursor / AI Tool
+        ↓ MCP Protocol (stdio)
+   MCP Server
+        ↓ WebSocket (localhost:7862)
+   Chrome Extension (your browser)
+        ↓ Browser automation
+   Target Website
+```
+
+1. Your AI tool calls `browser_start` with a task description
+2. The MCP server sends it to the Chrome extension via WebSocket relay
+3. The extension's built-in agent handles all browser interaction autonomously
+4. Results flow back to your AI tool
+
+The browser agent uses an accessibility tree to understand pages, not screenshots. It clicks, types, scrolls, navigates, and manages tabs — all on its own.
+
+## Comparison
+
+| | LLM in Chrome | Playwright MCP | Browser Use |
+|---|---|---|---|
+| **Abstraction** | Task-level (1 call) | Action-level (50+ calls) | Action-level (50+ calls) |
+| **Browser** | Your real Chrome | New headless browser | New Chromium instance |
+| **Logged-in sites** | Already authenticated | Must handle auth | Must handle auth |
+| **Setup** | Chrome extension | Playwright + Node | Python + pip |
+| **Parallel tasks** | Built-in | Manual | Manual |
+| **Session follow-ups** | Built-in | N/A | N/A |
+
+## Using as a Standalone Extension
+
+The extension also works on its own without the MCP server — just open the side panel and chat with the agent directly. It supports multiple LLM providers (Claude, GPT, Gemini, Mistral, Qwen) and can be configured through the extension settings.
+
+## Development
+
+```bash
+# Load unpacked extension
+git clone https://github.com/hanzili/llm-in-chrome.git
+# Open chrome://extensions → Enable Developer Mode → Load Unpacked → select the repo
+
+# Build MCP server
+cd mcp-server && npm install && npm run build
+
+# Watch for changes
+cd mcp-server && npm run dev
+```
 
 ## Contributing
 
@@ -232,9 +253,4 @@ See [mcp-server/README.md](mcp-server/README.md) for full documentation.
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Acknowledgments
-
-- Inspired by [Claude in Chrome](https://chrome.google.com/webstore/detail/claude/) by Anthropic
-- Built on the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/)
+MIT

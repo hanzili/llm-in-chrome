@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "LLM in Chrome",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "LLM-agnostic browser automation assistant",
 
   "icons": {
