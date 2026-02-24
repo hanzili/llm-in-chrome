@@ -1,6 +1,6 @@
 # LLM in Chrome
 
-Give your AI agent a browser. Works with Claude Code, Cursor, Windsurf, Codex CLI, and anything that supports MCP.
+Give your AI agent a browser agent. Works with Claude Code, Cursor, Windsurf, Codex CLI, and anything that supports MCP.
 
 [![Chrome Web Store](https://img.shields.io/chrome-web-store/v/iklpkemlmbhemkiojndpbhoakgikpmcd)](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)
 
@@ -35,16 +35,44 @@ ai: → { status: "complete", answer: "You have 3 open tickets..." }
 
 **[Install from Chrome Web Store](https://chrome.google.com/webstore/detail/iklpkemlmbhemkiojndpbhoakgikpmcd)**
 
-### 2. Install the native host
+### 2. Give the extension an LLM
+
+The extension runs its own browser agent — an LLM that reads pages, clicks, types, and navigates autonomously. You need to give it access to an LLM. Pick one:
+
+**Option A: Use your Claude or Codex subscription (no extra cost)**
 
 ```bash
+# Log in if you haven't already
+claude login    # for Claude Pro/Max subscribers
+# or
+codex login     # for ChatGPT Pro/Plus subscribers
+
+# Then install the credential bridge (Chrome extensions can't read local files,
+# so this small helper reads your login credentials and passes them to the extension)
 curl -fsSL https://raw.githubusercontent.com/hanzili/llm-in-chrome/main/install.sh | bash
 ```
 
-### 3. Add the MCP server
+Open the extension settings → click "Connect" under your plan.
+
+**Option B: Use an API key (no bridge needed)**
+
+Open the extension settings and paste a key from [Anthropic](https://console.anthropic.com), [OpenAI](https://platform.openai.com), [Google](https://aistudio.google.com), or [OpenRouter](https://openrouter.ai).
+
+---
+
+**Done!** The extension now works on its own. Open the side panel on any page and tell the agent what to do.
+
+If you also want your AI coding tool (Claude Code, Cursor, etc.) to use it, continue to step 3.
+
+---
+
+### 3. Connect to your AI coding tool (optional)
+
+This adds the browser as an MCP tool so Claude Code, Cursor, or any MCP client can call it:
 
 ```bash
-cd mcp-server && npm install && npm run build
+git clone https://github.com/hanzili/llm-in-chrome.git
+cd llm-in-chrome/mcp-server && npm install && npm run build
 ```
 
 Add to your MCP config:
@@ -57,7 +85,7 @@ Add to your MCP config:
   "mcpServers": {
     "browser": {
       "command": "node",
-      "args": ["/path/to/llm-in-chrome/mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/llm-in-chrome/mcp-server/dist/index.js"]
     }
   }
 }
@@ -72,7 +100,7 @@ Add to your MCP config:
   "mcpServers": {
     "browser": {
       "command": "node",
-      "args": ["/path/to/llm-in-chrome/mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/llm-in-chrome/mcp-server/dist/index.js"]
     }
   }
 }
@@ -84,42 +112,8 @@ Add to your MCP config:
 
 Point your MCP client to:
 ```
-node /path/to/llm-in-chrome/mcp-server/dist/index.js
+node /absolute/path/to/llm-in-chrome/mcp-server/dist/index.js
 ```
-</details>
-
-### 4. Set up credentials
-
-The extension needs LLM credentials to power the browser agent. Choose one:
-
-<details>
-<summary><strong>Claude Code subscription</strong> (recommended — no extra cost)</summary>
-
-If you already have Claude Code set up, the extension auto-detects your credentials:
-```bash
-claude login  # if not already logged in
-```
-Open the extension settings and click "Connect" under Claude Code Plan.
-</details>
-
-<details>
-<summary><strong>Codex subscription</strong></summary>
-
-```bash
-npm install -g @openai/codex
-codex login
-```
-Open the extension settings and click "Connect" under Codex Plan.
-</details>
-
-<details>
-<summary><strong>API keys</strong> (pay-per-use)</summary>
-
-Open the extension settings and enter your key for:
-- [Anthropic](https://console.anthropic.com)
-- [OpenAI](https://platform.openai.com)
-- [Google](https://aistudio.google.com)
-- [OpenRouter](https://openrouter.ai)
 </details>
 
 That's it. Your AI can now use your browser.
